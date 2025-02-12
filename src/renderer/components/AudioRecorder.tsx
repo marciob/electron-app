@@ -35,18 +35,29 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
   const handleAudioData = useCallback(
     (data: { buffer: Buffer; format: any; sessionId: number }) => {
-      // Add early rejection for stale chunks
-      if (data.sessionId < recordingSessionId.current) {
-        console.log(`Rejecting stale chunk from session ${data.sessionId}`);
+      // Check if we're actively recording and session matches
+      if (!isRecording || data.sessionId !== recordingSessionId.current) {
+        console.log(
+          `Skipping chunk - Recording: ${isRecording}, Session: ${data.sessionId} vs ${recordingSessionId.current}`
+        );
         return;
       }
 
-      // Early return if not recording or session mismatch
-      if (!isRecording || data.sessionId !== recordingSessionId.current) {
+      // Add time-based validation
+      const chunkTime = Date.now();
+      const recordingTime = chunkTime - recordingStartTimeRef.current;
+      const expectedSamples = Math.ceil(
+        (recordingTime / 1000) * data.format.sampleRate
+      );
+      const currentSamples = audioChunksRef.current.reduce(
+        (acc, chunk) => acc + chunk.length,
+        0
+      );
+
+      // If we've already processed more samples than we should have based on time, skip this chunk
+      if (currentSamples > expectedSamples) {
         console.log(
-          `Skipping audio chunk - Recording: ${isRecording}, ` +
-            `Session current: ${recordingSessionId.current}, ` +
-            `Chunk session: ${data.sessionId}`
+          `Skipping excess chunk - Current samples: ${currentSamples}, Expected: ${expectedSamples}`
         );
         return;
       }
@@ -57,49 +68,25 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         return;
       }
 
-      // Validate sample count
-      const expectedBytesPerSample = data.format.bitsPerChannel / 8;
-      if (data.buffer.length % expectedBytesPerSample !== 0) {
-        console.error(
-          `Invalid buffer length: ${data.buffer.length} bytes for ${expectedBytesPerSample} bytes/sample`
-        );
-        return;
-      }
-
-      // Update format state if needed
-      if (
-        data.format.sampleRate !== audioFormat.sampleRate ||
-        data.format.channels !== audioFormat.channels
-      ) {
-        setAudioFormat({
-          sampleRate: data.format.sampleRate,
-          channels: data.format.channels,
-        });
-      }
-
       // Convert buffer using correct byte interpretation
-      const bytesPerSample = data.format.bitsPerChannel / 8;
-      const sampleCount = data.buffer.length / bytesPerSample;
-
-      // Create Int16Array from the buffer
       const int16Array = new Int16Array(
         data.buffer.buffer,
         data.buffer.byteOffset,
-        sampleCount
+        data.buffer.length / 2
       );
 
       // Convert to float32 for consistent processing
-      const float32Array = new Float32Array(sampleCount);
-      const scale = 1.0 / 32768.0; // Convert from Int16 range to [-1, 1]
+      const float32Array = new Float32Array(int16Array.length);
+      const scale = 1.0 / 32768.0;
 
-      for (let i = 0; i < sampleCount; i++) {
+      for (let i = 0; i < int16Array.length; i++) {
         float32Array[i] = int16Array[i] * scale;
       }
 
       // Store the converted buffer
       audioChunksRef.current.push(float32Array);
 
-      // Log detailed statistics
+      // Log statistics for debugging
       const totalSamples = audioChunksRef.current.reduce(
         (acc, chunk) => acc + chunk.length,
         0
@@ -109,13 +96,14 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
       console.log(
         `Chunk processed - ` +
-          `Size: ${sampleCount} samples, ` +
+          `Size: ${float32Array.length} samples, ` +
           `Total chunks: ${audioChunksRef.current.length}, ` +
-          `Total duration: ${theoreticalDuration.toFixed(3)}s, ` +
-          `Wall time: ${wallClockTime.toFixed(3)}s`
+          `Total samples: ${totalSamples}, ` +
+          `Wall time: ${wallClockTime.toFixed(3)}s, ` +
+          `Theoretical: ${theoreticalDuration.toFixed(3)}s`
       );
     },
-    [isRecording] // Only depend on recording state
+    [isRecording]
   );
 
   useEffect(() => {
@@ -151,10 +139,29 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       .padStart(2, "0")}`;
   };
 
-  const cleanupAudioContext = () => {
-    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+  const cleanupRecording = async () => {
+    // Stop audio capture first
+    try {
+      await window.electron.ipcRenderer.invoke("stop-audio-capture");
+    } catch (error) {
+      console.error("Error stopping capture:", error);
+    }
+
+    // Reset all state
+    audioChunksRef.current = [];
+    recordingStartTimeRef.current = 0;
+    setIsRecording(false);
+    setIsRecordingSystem(false);
+    setTimer(0);
+
+    // Close audio context
+    if (audioContextRef.current) {
+      try {
+        await audioContextRef.current.close();
+        audioContextRef.current = null;
+      } catch (error) {
+        console.error("Error closing audio context:", error);
+      }
     }
   };
 
@@ -163,17 +170,11 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setIsProcessing(true);
 
     try {
-      // Aggressive cleanup first
-      if (audioContextRef.current) {
-        try {
-          await audioContextRef.current.close();
-        } catch (error) {
-          console.warn("Error closing existing audio context:", error);
-        }
-        audioContextRef.current = null;
-      }
+      // Ensure complete cleanup of previous recording state
+      await window.electron.ipcRenderer.invoke("stop-audio-capture");
+      await new Promise((resolve) => setTimeout(resolve, 500)); // Add delay for cleanup
 
-      // Clear any existing chunks and reset state
+      // Reset all state
       audioChunksRef.current = [];
       recordingStartTimeRef.current = 0;
       recordingSessionId.current += 1;
@@ -185,59 +186,33 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       setIsRecordingSystem(false);
       setAudioFormat({ sampleRate: 48000, channels: 1 });
 
-      // Create new context with explicit sample rate
+      // Create new audio context
+      if (audioContextRef.current) {
+        await audioContextRef.current.close();
+      }
       audioContextRef.current = new AudioContext({
-        sampleRate: 48000, // Force 48kHz to match native audio
+        sampleRate: 48000,
       });
 
       console.log(
         `Starting new recording session ${currentSessionId}:`,
-        `\n- Audio context sample rate: ${audioContextRef.current.sampleRate}Hz`,
-        `\n- Initial format: 48000Hz, 1 channel`
+        `\n- Audio context sample rate: ${audioContextRef.current.sampleRate}Hz`
       );
 
-      // Start the capture first
+      // Start the capture
       await window.electron.ipcRenderer.invoke("start-audio-capture", {
         sessionId: currentSessionId,
         system: true,
         mic: false,
       });
 
-      // Only after capture is started, set the recording state and start time
+      // Set recording state
       recordingStartTimeRef.current = Date.now();
       setIsRecording(true);
       setIsRecordingSystem(true);
-
-      console.log(
-        `Recording started successfully:`,
-        `\n- Session ID: ${currentSessionId}`,
-        `\n- Start time: ${new Date(
-          recordingStartTimeRef.current
-        ).toISOString()}`
-      );
     } catch (error) {
       console.error("Failed to start recording:", error);
-
-      // Aggressive cleanup on error
-      audioChunksRef.current = [];
-      recordingStartTimeRef.current = 0;
-
-      // Reset audio context
-      if (audioContextRef.current) {
-        try {
-          await audioContextRef.current.close();
-        } catch (e) {
-          console.warn("Error closing audio context during cleanup:", e);
-        }
-        audioContextRef.current = null;
-      }
-
-      // Reset all state
-      setIsRecording(false);
-      setIsRecordingSystem(false);
-      setTimer(0);
-      setAudioFormat({ sampleRate: 48000, channels: 1 });
-
+      await cleanupRecording();
       throw error;
     } finally {
       setIsProcessing(false);
