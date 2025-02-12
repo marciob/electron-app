@@ -66,11 +66,42 @@ function createWindow() {
       throw error;
     }
   };
+  ipcMain.handle("stop-audio-capture", async () => {
+    try {
+      await stopExistingCapture();
+    } catch (error) {
+      console.error("Error stopping audio capture:", error);
+      throw error;
+    }
+  });
+  const stopExistingCapture = async () => {
+    if (audioCapture) {
+      console.log("Stopping previous capture instance");
+      try {
+        await Promise.race([
+          audioCapture.stopCapture(),
+          new Promise(
+            (_, reject) => setTimeout(() => reject(new Error("Stop capture timeout")), 1e3)
+          )
+        ]);
+        const oldCapture = audioCapture;
+        audioCapture = null;
+        if (oldCapture.jsCallback) {
+          oldCapture.jsCallback = null;
+        }
+      } catch (error) {
+        console.error("Error stopping capture:", error);
+        audioCapture = null;
+      }
+    }
+  };
   ipcMain.handle(
     "start-audio-capture",
     async (event, options) => {
       try {
+        console.log("Starting new audio capture with options:", options);
         await requestPermissions();
+        await stopExistingCapture();
         initAudioCapture();
         audioCapture.startCapture((buffer, format) => {
           if (!mainWindow.isDestroyed()) {
@@ -81,21 +112,20 @@ function createWindow() {
             });
           }
         });
+        console.log("Audio capture started successfully");
       } catch (error) {
         console.error("Error starting audio capture:", error);
+        await stopExistingCapture();
         throw error;
       }
     }
   );
-  ipcMain.handle("stop-audio-capture", () => {
+  mainWindow.on("closed", async () => {
     try {
-      if (audioCapture) {
-        audioCapture.stopCapture();
-        audioCapture = null;
-      }
+      console.log("Window closing, cleaning up audio capture");
+      await stopExistingCapture();
     } catch (error) {
-      console.error("Error stopping audio capture:", error);
-      throw error;
+      console.error("Error cleaning up audio capture:", error);
     }
   });
 }

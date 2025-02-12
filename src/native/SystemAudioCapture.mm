@@ -67,23 +67,52 @@
     }];
 }
 
-- (void)stopCapture {
+- (void)stopCaptureWithCompletion:(void (^)(void))completion {
     NSLog(@"Stopping audio capture...");
-    if (self.jsCallback) {
-        self.jsCallback.Release();
-        self.jsCallback = nullptr; // Prevent further calls
-    }
     
-    if (self.stream) {
-        [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
-            if (error) {
-                NSLog(@"Error stopping capture: %@", error);
-                return;
+    // Ensure we're on the main queue for thread safety
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Release JS callback first to prevent any new data from being sent
+        if (self.jsCallback) {
+            self.jsCallback.Release();
+            self.jsCallback = nullptr;
+        }
+        
+        if (self.stream) {
+            // Remove stream output before stopping
+            if (@available(macOS 13.0, *)) {
+                NSError *removeError = nil;
+                [self.stream removeStreamOutput:self type:SCStreamOutputTypeAudio error:&removeError];
+                if (removeError) {
+                    NSLog(@"Error removing stream output: %@", removeError);
+                }
             }
-            NSLog(@"Audio capture stopped successfully");
-            self.stream = nil;
-        }];
-    }
+            
+            // Stop the capture stream
+            [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
+                if (error) {
+                    NSLog(@"Error stopping capture: %@", error);
+                } else {
+                    NSLog(@"Audio capture stopped successfully");
+                }
+                
+                // Cleanup stream
+                self.stream = nil;
+                
+                // Call completion handler on main queue
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) {
+                        completion();
+                    }
+                });
+            }];
+        } else {
+            // If no stream exists, just call completion
+            if (completion) {
+                completion();
+            }
+        }
+    });
 }
 
 - (void)stream:(SCStream *)stream 
@@ -101,21 +130,54 @@
         return;
     }
 
-    // Log detailed format details
-    NSLog(@"Audio format details: %d channels, %.1f Hz, %d bits, %@", 
-        (int)asbd->mChannelsPerFrame, 
-        asbd->mSampleRate,
-        (int)asbd->mBitsPerChannel,
-        (asbd->mFormatFlags & kAudioFormatFlagIsFloat) ? @"float" : @"integer");
-    
+    // Calculate sample count correctly based on bytes per frame
+    size_t bytesPerFrame = asbd->mBytesPerFrame;
+    size_t sampleCount = CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer)) / bytesPerFrame;
+
+    // Add validation
+    if (CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer)) % bytesPerFrame != 0) {
+        NSLog(@"⚠️ Invalid audio chunk: %zu bytes with %zu bytes/frame", CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer)), bytesPerFrame);
+        return;
+    }
+
+    // Validate audio format
+    if (asbd->mSampleRate != 48000.0) {
+        NSLog(@"⚠️ Unexpected sample rate: %.1f Hz (expected 48000 Hz)", asbd->mSampleRate);
+    }
+    if (asbd->mChannelsPerFrame != 1) {
+        NSLog(@"⚠️ Unexpected channel count: %d (expected 1)", (int)asbd->mChannelsPerFrame);
+    }
+    if (asbd->mBitsPerChannel != 16 && asbd->mBitsPerChannel != 32) {
+        NSLog(@"⚠️ Unexpected bits per channel: %d (expected 16 or 32)", (int)asbd->mBitsPerChannel);
+    }
+    if (!(asbd->mFormatFlags & kAudioFormatFlagIsFloat) && asbd->mBitsPerChannel == 32) {
+        NSLog(@"⚠️ Unexpected format: 32-bit non-float data");
+    }
+
+    // Log detailed format details with validation markers
+    NSLog(@"Audio format details:%@%@%@", 
+        asbd->mSampleRate != 48000.0 ? @" ⚠️" : @"",
+        asbd->mChannelsPerFrame != 1 ? @" ⚠️" : @"",
+        asbd->mBitsPerChannel != 16 && asbd->mBitsPerChannel != 32 ? @" ⚠️" : @"");
+    NSLog(@"- Sample rate: %.1f Hz", asbd->mSampleRate);
+    NSLog(@"- Channels: %d", (int)asbd->mChannelsPerFrame);
+    NSLog(@"- Bits per channel: %d", (int)asbd->mBitsPerChannel);
+    NSLog(@"- Format: %@", (asbd->mFormatFlags & kAudioFormatFlagIsFloat) ? @"float" : @"integer");
+    NSLog(@"- Bytes per frame: %d", (int)asbd->mBytesPerFrame);
+    NSLog(@"- Frames per packet: %d", (int)asbd->mFramesPerPacket);
+
     CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
     size_t length = CMBlockBufferGetDataLength(blockBuffer);
+    
     void *buffer = malloc(length);
+    if (!buffer) {
+        NSLog(@"⚠️ Failed to allocate buffer for audio data");
+        return;
+    }
     
     CMBlockBufferCopyDataBytes(blockBuffer, 0, length, buffer);
     
-    // Convert to 16-bit PCM for consistent handling in JS
-    size_t sampleCount = length / (asbd->mBitsPerChannel / 8);
+    // Allocate buffer for converted samples
     int16_t *pcmBuffer = (int16_t *)malloc(sampleCount * sizeof(int16_t));
     
     if (asbd->mFormatID == kAudioFormatLinearPCM) {
@@ -186,20 +248,17 @@
             memcpy(pcmBuffer, buffer, length);
             
             // Log levels for 16-bit input
-            int16_t *inputBuffer = (int16_t *)buffer;
             int16_t maxLevel = 0;
             int16_t minLevel = 0;
             for (size_t i = 0; i < sampleCount; i++) {
-                if (inputBuffer[i] > maxLevel) maxLevel = inputBuffer[i];
-                if (inputBuffer[i] < minLevel) minLevel = inputBuffer[i];
+                if (pcmBuffer[i] > maxLevel) maxLevel = pcmBuffer[i];
+                if (pcmBuffer[i] < minLevel) minLevel = pcmBuffer[i];
             }
             NSLog(@"16-bit PCM levels - Max: %d, Min: %d", maxLevel, minLevel);
         }
     }
     
     free(buffer);
-    
-    NSLog(@"Processing audio chunk: %zu samples at %.1f Hz", sampleCount, asbd->mSampleRate);
 
     self.jsCallback.BlockingCall([pcmBuffer, sampleCount, asbd](Napi::Env env, Napi::Function jsCallback) {
         auto audioBuffer = Napi::Buffer<int16_t>::Copy(env, pcmBuffer, sampleCount);
@@ -258,8 +317,29 @@ private:
 
     Napi::Value StopCapture(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
-        [capturer stopCapture];
-        return env.Undefined();
+        
+        // Create a promise to handle the async operation
+        auto deferred = Napi::Promise::Deferred::New(env);
+        
+        try {
+            if (!capturer) {
+                deferred.Resolve(env.Undefined());
+                return deferred.Promise();
+            }
+
+            // Store the deferred object in a shared pointer to keep it alive
+            auto deferredPtr = std::make_shared<Napi::Promise::Deferred>(std::move(deferred));
+            
+            [capturer stopCaptureWithCompletion:^{
+                // Resolve the promise on the JS thread
+                deferredPtr->Resolve(deferredPtr->Env().Undefined());
+            }];
+            
+            return deferredPtr->Promise();
+        } catch (const std::exception& e) {
+            deferred.Reject(Napi::Error::New(env, e.what()).Value());
+            return deferred.Promise();
+        }
     }
 };
 

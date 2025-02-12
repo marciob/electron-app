@@ -86,15 +86,56 @@ function createWindow() {
   };
 
   // Handle IPC messages
+  ipcMain.handle("stop-audio-capture", async () => {
+    try {
+      await stopExistingCapture();
+    } catch (error) {
+      console.error("Error stopping audio capture:", error);
+      throw error;
+    }
+  });
+
+  const stopExistingCapture = async () => {
+    if (audioCapture) {
+      console.log("Stopping previous capture instance");
+      try {
+        // Add timeout to prevent hanging
+        await Promise.race([
+          audioCapture.stopCapture(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Stop capture timeout")), 1000)
+          ),
+        ]);
+
+        // Cleanup after successful stop
+        const oldCapture = audioCapture;
+        audioCapture = null;
+        if (oldCapture.jsCallback) {
+          oldCapture.jsCallback = null;
+        }
+      } catch (error) {
+        console.error("Error stopping capture:", error);
+        // Ensure cleanup even on error
+        audioCapture = null;
+      }
+    }
+  };
+
   ipcMain.handle(
     "start-audio-capture",
     async (event, options: AudioCaptureOptions) => {
       try {
+        console.log("Starting new audio capture with options:", options);
         await requestPermissions();
+
+        // Stop any existing capture first
+        await stopExistingCapture();
+
+        // Initialize new capture instance
         initAudioCapture();
 
+        // Start capture with the callback
         audioCapture.startCapture((buffer: Buffer, format: any) => {
-          // Send the audio data to the renderer process with session ID
           if (!mainWindow.isDestroyed()) {
             mainWindow.webContents.send("audio-data", {
               buffer,
@@ -103,22 +144,24 @@ function createWindow() {
             });
           }
         });
+
+        console.log("Audio capture started successfully");
       } catch (error) {
         console.error("Error starting audio capture:", error);
+        // Ensure cleanup on error
+        await stopExistingCapture();
         throw error;
       }
     }
   );
 
-  ipcMain.handle("stop-audio-capture", () => {
+  // Clean up on window close
+  mainWindow.on("closed", async () => {
     try {
-      if (audioCapture) {
-        audioCapture.stopCapture();
-        audioCapture = null;
-      }
+      console.log("Window closing, cleaning up audio capture");
+      await stopExistingCapture();
     } catch (error) {
-      console.error("Error stopping audio capture:", error);
-      throw error;
+      console.error("Error cleaning up audio capture:", error);
     }
   });
 }
