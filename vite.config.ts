@@ -6,20 +6,31 @@ import { resolve } from "path";
 export default defineConfig({
   plugins: [
     react(),
-    electron({
-      entry: "src/main/main.ts",
-      vite: {
-        build: {
-          outDir: "dist-electron",
-          rollupOptions: {
-            external: ["electron"],
+    electron([
+      {
+        entry: "src/main/main.ts",
+        vite: {
+          build: {
+            outDir: "dist-electron",
+            sourcemap: true,
+            emptyOutDir: true,
+            watch: {},
           },
         },
       },
-      onstart(options) {
-        options.startup();
+      {
+        entry: "src/preload/index.ts",
+        vite: {
+          build: {
+            outDir: "dist-electron/preload",
+            sourcemap: true,
+          },
+        },
+        onstart(options) {
+          options.reload();
+        },
       },
-    }),
+    ]),
   ],
   resolve: {
     alias: {
@@ -27,4 +38,5 @@ export default defineConfig({
     },
   },
   base: "./",
+  clearScreen: false,
 });
