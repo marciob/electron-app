@@ -34,7 +34,8 @@
             config.capturesAudio = YES;
             config.excludesCurrentProcessAudio = YES;
             config.channelCount = 1;    // Mono audio
-            NSLog(@"Configured audio capture with mono audio");
+            // Let system handle sample rate
+            NSLog(@"Configured audio capture with system default sample rate and mono audio");
         }
 
         self.stream = [[SCStream alloc] 
@@ -68,6 +69,11 @@
 
 - (void)stopCapture {
     NSLog(@"Stopping audio capture...");
+    if (self.jsCallback) {
+        self.jsCallback.Release();
+        self.jsCallback = nullptr; // Prevent further calls
+    }
+    
     if (self.stream) {
         [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
             if (error) {
@@ -78,17 +84,13 @@
             self.stream = nil;
         }];
     }
-    
-    if (self.jsCallback) {
-        self.jsCallback.Release();
-    }
 }
 
 - (void)stream:(SCStream *)stream 
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer 
     ofType:(SCStreamOutputType)type API_AVAILABLE(macos(13.0)) {
     
-    if (type != SCStreamOutputTypeAudio) return;
+    if (type != SCStreamOutputTypeAudio || !self.jsCallback) return;
 
     // Get audio format details
     CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
@@ -99,11 +101,12 @@
         return;
     }
 
-    // Log format details
-    NSLog(@"Received audio format: %d channels, %.1f Hz, %d bits", 
+    // Log detailed format details
+    NSLog(@"Audio format details: %d channels, %.1f Hz, %d bits, %@", 
         (int)asbd->mChannelsPerFrame, 
         asbd->mSampleRate,
-        (int)asbd->mBitsPerChannel);
+        (int)asbd->mBitsPerChannel,
+        (asbd->mFormatFlags & kAudioFormatFlagIsFloat) ? @"float" : @"integer");
     
     CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
     size_t length = CMBlockBufferGetDataLength(blockBuffer);
@@ -118,24 +121,85 @@
     if (asbd->mFormatID == kAudioFormatLinearPCM) {
         if (asbd->mBitsPerChannel == 32 && (asbd->mFormatFlags & kAudioFormatFlagIsFloat)) {
             float *floatBuffer = (float *)buffer;
+            
+            // Log input levels
+            float maxInput = 0.0f;
+            float minInput = 0.0f;
+            for (size_t i = 0; i < sampleCount; i++) {
+                if (floatBuffer[i] > maxInput) maxInput = floatBuffer[i];
+                if (floatBuffer[i] < minInput) minInput = floatBuffer[i];
+            }
+            NSLog(@"Float input levels - Max: %.6f, Min: %.6f", maxInput, minInput);
+            
+            // Convert float to 16-bit with fixed scaling and -3dB headroom
+            const float maxAllowed = 0.7071f; // -3dB
+            const float scale = 32767.0f;
             for (size_t i = 0; i < sampleCount; i++) {
                 float sample = floatBuffer[i];
-                sample = fmax(-1.0f, fmin(1.0f, sample)); // Clamp to [-1, 1]
-                pcmBuffer[i] = (int16_t)(sample * 32767.0f);
+                // Apply -3dB headroom clipping
+                if (sample > maxAllowed) sample = maxAllowed;
+                if (sample < -maxAllowed) sample = -maxAllowed;
+                pcmBuffer[i] = (int16_t)(sample * scale);
             }
+            
+            // Log output levels
+            int16_t maxOutput = 0;
+            int16_t minOutput = 0;
+            for (size_t i = 0; i < sampleCount; i++) {
+                if (pcmBuffer[i] > maxOutput) maxOutput = pcmBuffer[i];
+                if (pcmBuffer[i] < minOutput) minOutput = pcmBuffer[i];
+            }
+            NSLog(@"PCM output levels - Max: %d, Min: %d", maxOutput, minOutput);
+            
         } else if (asbd->mBitsPerChannel == 32 && !(asbd->mFormatFlags & kAudioFormatFlagIsFloat)) {
             int32_t *intBuffer = (int32_t *)buffer;
+            
+            // Log input levels
+            int32_t maxInput = 0;
+            int32_t minInput = 0;
             for (size_t i = 0; i < sampleCount; i++) {
-                pcmBuffer[i] = (int16_t)(intBuffer[i] >> 16);
+                if (intBuffer[i] > maxInput) maxInput = intBuffer[i];
+                if (intBuffer[i] < minInput) minInput = intBuffer[i];
             }
+            NSLog(@"32-bit int input levels - Max: %d, Min: %d", maxInput, minInput);
+            
+            // Convert 32-bit int to 16-bit with -3dB headroom
+            const float maxAllowed = 0.7071f;
+            for (size_t i = 0; i < sampleCount; i++) {
+                float normalizedSample = (float)(intBuffer[i] >> 16) / 32768.0f;
+                if (normalizedSample > maxAllowed) normalizedSample = maxAllowed;
+                if (normalizedSample < -maxAllowed) normalizedSample = -maxAllowed;
+                pcmBuffer[i] = (int16_t)(normalizedSample * 32767.0f);
+            }
+            
+            // Log output levels
+            int16_t maxOutput = 0;
+            int16_t minOutput = 0;
+            for (size_t i = 0; i < sampleCount; i++) {
+                if (pcmBuffer[i] > maxOutput) maxOutput = pcmBuffer[i];
+                if (pcmBuffer[i] < minOutput) minOutput = pcmBuffer[i];
+            }
+            NSLog(@"PCM output levels - Max: %d, Min: %d", maxOutput, minOutput);
+            
         } else if (asbd->mBitsPerChannel == 16) {
+            // Direct copy for 16-bit audio
             memcpy(pcmBuffer, buffer, length);
+            
+            // Log levels for 16-bit input
+            int16_t *inputBuffer = (int16_t *)buffer;
+            int16_t maxLevel = 0;
+            int16_t minLevel = 0;
+            for (size_t i = 0; i < sampleCount; i++) {
+                if (inputBuffer[i] > maxLevel) maxLevel = inputBuffer[i];
+                if (inputBuffer[i] < minLevel) minLevel = inputBuffer[i];
+            }
+            NSLog(@"16-bit PCM levels - Max: %d, Min: %d", maxLevel, minLevel);
         }
     }
     
     free(buffer);
     
-    NSLog(@"Sending audio chunk of size: %zu bytes", sampleCount * sizeof(int16_t));
+    NSLog(@"Processing audio chunk: %zu samples at %.1f Hz", sampleCount, asbd->mSampleRate);
 
     self.jsCallback.BlockingCall([pcmBuffer, sampleCount, asbd](Napi::Env env, Napi::Function jsCallback) {
         auto audioBuffer = Napi::Buffer<int16_t>::Copy(env, pcmBuffer, sampleCount);

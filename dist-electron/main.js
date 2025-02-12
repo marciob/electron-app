@@ -66,20 +66,27 @@ function createWindow() {
       throw error;
     }
   };
-  ipcMain.handle("start-audio-capture", async (event, options = {}) => {
-    try {
-      await requestPermissions();
-      initAudioCapture();
-      audioCapture.startCapture((buffer, format) => {
-        if (!mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("audio-data", buffer, format);
-        }
-      });
-    } catch (error) {
-      console.error("Error starting audio capture:", error);
-      throw error;
+  ipcMain.handle(
+    "start-audio-capture",
+    async (event, options) => {
+      try {
+        await requestPermissions();
+        initAudioCapture();
+        audioCapture.startCapture((buffer, format) => {
+          if (!mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("audio-data", {
+              buffer,
+              format,
+              sessionId: options.sessionId
+            });
+          }
+        });
+      } catch (error) {
+        console.error("Error starting audio capture:", error);
+        throw error;
+      }
     }
-  });
+  );
   ipcMain.handle("stop-audio-capture", () => {
     try {
       if (audioCapture) {

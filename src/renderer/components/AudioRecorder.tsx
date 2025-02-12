@@ -21,6 +21,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const [isRecording, setIsRecording] = useState(false);
   const [isRecordingMic, setIsRecordingMic] = useState(false);
   const [isRecordingSystem, setIsRecordingSystem] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [timer, setTimer] = useState(0);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [audioFormat, setAudioFormat] = useState<{
@@ -29,27 +30,67 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   }>({ sampleRate: 44100, channels: 1 });
   const audioChunksRef = useRef<Float32Array[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const recordingStartTimeRef = useRef<number>(0);
+  const recordingSessionId = useRef(0);
 
   useEffect(() => {
     // Initialize audio context
-    audioContextRef.current = new AudioContext();
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext();
+    }
 
     // Set up IPC listener for audio data
-    const handleAudioData = (buffer: Buffer, format: any) => {
-      console.log("Received audio format:", format);
+    const handleAudioData = (data: {
+      buffer: Buffer;
+      format: any;
+      sessionId: number;
+    }) => {
+      console.log(
+        `Received chunk - Session: ${data.sessionId},`,
+        `Current session: ${recordingSessionId.current}`
+      );
+
       setAudioFormat({
-        sampleRate: format.sampleRate,
-        channels: format.channels,
+        sampleRate: data.format.sampleRate,
+        channels: data.format.channels,
       });
 
-      if (isRecording) {
-        // Convert 16-bit PCM to 32-bit float
-        const int16Array = new Int16Array(buffer.buffer);
+      // Only process if session matches
+      if (isRecording && data.sessionId === recordingSessionId.current) {
+        // Convert 16-bit PCM to 32-bit float with fixed scaling
+        const int16Array = new Int16Array(data.buffer.buffer);
+
+        // Log input PCM levels
+        let maxInputPCM = 0;
+        let minInputPCM = 0;
+        for (let i = 0; i < int16Array.length; i++) {
+          if (int16Array[i] > maxInputPCM) maxInputPCM = int16Array[i];
+          if (int16Array[i] < minInputPCM) minInputPCM = int16Array[i];
+        }
+        console.log(
+          `Input PCM levels - Max: ${maxInputPCM}, Min: ${minInputPCM}`
+        );
+
         const float32Array = new Float32Array(int16Array.length);
 
+        // Direct conversion from 16-bit to float32 with fixed scaling
+        const scale = 1.0 / 32768.0;
         for (let i = 0; i < int16Array.length; i++) {
-          float32Array[i] = int16Array[i] / 32768.0; // Normalize to [-1, 1]
+          float32Array[i] = int16Array[i] * scale;
         }
+
+        // Log float32 levels
+        let maxFloat = 0;
+        let minFloat = 0;
+        for (let i = 0; i < float32Array.length; i++) {
+          if (float32Array[i] > maxFloat) maxFloat = float32Array[i];
+          if (float32Array[i] < minFloat) minFloat = float32Array[i];
+        }
+        console.log(
+          `Converted float levels - Max: ${maxFloat.toFixed(
+            6
+          )}, Min: ${minFloat.toFixed(6)}`
+        );
 
         audioChunksRef.current.push(float32Array);
       }
@@ -58,10 +99,6 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     window.electron.ipcRenderer.on("audio-data", handleAudioData);
 
     return () => {
-      // Cleanup
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
       window.electron.ipcRenderer.removeListener("audio-data", handleAudioData);
     };
   }, [isRecording]);
@@ -71,8 +108,14 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
     if (isRecordingMic || isRecordingSystem) {
       interval = setInterval(() => {
-        setTimer((prev) => prev + 1);
-      }, 1000);
+        // Calculate time from actual samples
+        const totalSamples = audioChunksRef.current.reduce(
+          (acc, chunk) => acc + chunk.length,
+          0
+        );
+        const timeInSeconds = Math.floor(totalSamples / audioFormat.sampleRate);
+        setTimer(timeInSeconds);
+      }, 100); // Update more frequently for smoother display
     } else {
       setTimer(0);
     }
@@ -80,7 +123,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isRecordingMic, isRecordingSystem]);
+  }, [isRecordingMic, isRecordingSystem, audioFormat.sampleRate]);
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -90,22 +133,47 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       .padStart(2, "0")}`;
   };
 
+  const cleanupAudioContext = () => {
+    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+  };
+
   const startRecording = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
+
     try {
-      audioChunksRef.current = []; // Reset chunks
+      // Increment session ID
+      recordingSessionId.current += 1;
+      const currentSessionId = recordingSessionId.current;
+
+      // Reset audio context
+      cleanupAudioContext();
+      audioContextRef.current = new AudioContext();
+
+      // Reset audio chunks
+      audioChunksRef.current = [];
+      recordingStartTimeRef.current = Date.now();
+
       await window.electron.ipcRenderer.invoke("start-audio-capture", {
-        system: isRecordingSystem,
-        mic: isRecordingMic,
+        sessionId: currentSessionId,
+        system: true,
+        mic: false,
       });
       setIsRecording(true);
       setIsRecordingSystem(true);
     } catch (error) {
       console.error("Failed to start recording:", error);
+    } finally {
+      setTimeout(() => setIsProcessing(false), 500); // 500ms cooldown
     }
   };
 
   const stopRecording = async () => {
     try {
+      const currentSessionId = recordingSessionId.current;
       await window.electron.ipcRenderer.invoke("stop-audio-capture");
       setIsRecording(false);
       setIsRecordingSystem(false);
@@ -115,17 +183,15 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         throw new Error("No audio data was recorded");
       }
 
-      // Combine all audio chunks
-      const totalLength = audioChunksRef.current.reduce(
+      // Calculate actual recording duration from samples
+      const actualSamples = audioChunksRef.current.reduce(
         (acc, chunk) => acc + chunk.length,
         0
       );
+      console.log("Actual samples:", actualSamples);
 
-      if (totalLength === 0) {
-        throw new Error("Total audio length is 0");
-      }
-
-      const combinedArray = new Float32Array(totalLength);
+      // Combine all audio chunks
+      const combinedArray = new Float32Array(actualSamples);
       let offset = 0;
 
       audioChunksRef.current.forEach((chunk) => {
@@ -133,12 +199,42 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         offset += chunk.length;
       });
 
-      // Create audio buffer with correct sample rate
-      const audioBuffer = audioContextRef.current!.createBuffer(
-        audioFormat.channels,
-        combinedArray.length,
-        audioFormat.sampleRate // Use actual sample rate
+      // Log combined array levels before processing
+      let maxCombined = 0;
+      let minCombined = 0;
+      for (let i = 0; i < combinedArray.length; i++) {
+        if (combinedArray[i] > maxCombined) maxCombined = combinedArray[i];
+        if (combinedArray[i] < minCombined) minCombined = combinedArray[i];
+      }
+      console.log(
+        `Combined array levels - Max: ${maxCombined.toFixed(
+          6
+        )}, Min: ${minCombined.toFixed(6)}`
       );
+
+      // Create audio buffer with actual samples
+      const audioBuffer = new AudioBuffer({
+        length: actualSamples,
+        numberOfChannels: audioFormat.channels,
+        sampleRate: audioFormat.sampleRate,
+      });
+
+      // Apply proper peak normalization
+      const targetPeak = 0.8; // -2dB headroom
+      let peakValue = 0;
+      for (let i = 0; i < combinedArray.length; i++) {
+        peakValue = Math.max(peakValue, Math.abs(combinedArray[i]));
+      }
+
+      // Apply normalization if needed
+      if (peakValue > targetPeak) {
+        const scaleFactor = targetPeak / peakValue;
+        for (let i = 0; i < combinedArray.length; i++) {
+          combinedArray[i] *= scaleFactor;
+        }
+      }
+
+      // Set the normalized data
       audioBuffer.getChannelData(0).set(combinedArray);
 
       // Convert to WAV
@@ -157,11 +253,17 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         channels: audioFormat.channels,
       };
 
-      setRecordings((prev) => [newRecording, ...prev]);
+      // Only update if we're still in the same session
+      if (currentSessionId === recordingSessionId.current) {
+        setRecordings((prev) => [newRecording, ...prev]);
 
-      if (onRecordingComplete) {
-        onRecordingComplete(wavBlob);
+        if (onRecordingComplete) {
+          onRecordingComplete(wavBlob);
+        }
       }
+
+      // Cleanup audio context after recording
+      cleanupAudioContext();
     } catch (error) {
       console.error("Failed to stop recording:", error);
       alert(
@@ -172,7 +274,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
   const audioBufferToWav = (buffer: AudioBuffer): Promise<Blob> => {
     const numChannels = buffer.numberOfChannels;
-    const sampleRate = buffer.sampleRate; // Use actual sample rate
+    const sampleRate = buffer.sampleRate;
     const format = 1; // PCM
     const bitDepth = 16;
 
@@ -202,16 +304,19 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     writeString(view, 36, "data");
     view.setUint32(40, dataLength, true);
 
-    // Write audio data
+    // Write audio data with dithering
     const channelData = buffer.getChannelData(0);
     let offset = 44;
+
+    const dither = (sample: number) => {
+      return sample + (Math.random() * 2 - 1) / 32768;
+    };
+
     for (let i = 0; i < channelData.length; i++) {
-      const sample = Math.max(-1, Math.min(1, channelData[i]));
-      view.setInt16(
-        offset,
-        sample < 0 ? sample * 0x8000 : sample * 0x7fff,
-        true
-      );
+      let sample = dither(channelData[i]);
+      sample = Math.max(-1.0, Math.min(1.0, sample));
+      const pcmValue = Math.round(sample * 32767);
+      view.setInt16(offset, pcmValue, true);
       offset += 2;
     }
 

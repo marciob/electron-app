@@ -9,6 +9,12 @@ const path = require("path");
 const isDev = require("electron-is-dev");
 const { SystemAudioCapture } = require("bindings")("systemAudio");
 
+interface AudioCaptureOptions {
+  sessionId: number;
+  system: boolean;
+  mic: boolean;
+}
+
 let audioCapture: any = null;
 
 function createWindow() {
@@ -80,22 +86,29 @@ function createWindow() {
   };
 
   // Handle IPC messages
-  ipcMain.handle("start-audio-capture", async (event, options = {}) => {
-    try {
-      await requestPermissions();
-      initAudioCapture();
+  ipcMain.handle(
+    "start-audio-capture",
+    async (event, options: AudioCaptureOptions) => {
+      try {
+        await requestPermissions();
+        initAudioCapture();
 
-      audioCapture.startCapture((buffer: Buffer, format: any) => {
-        // Send the audio data to the renderer process
-        if (!mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("audio-data", buffer, format);
-        }
-      });
-    } catch (error) {
-      console.error("Error starting audio capture:", error);
-      throw error;
+        audioCapture.startCapture((buffer: Buffer, format: any) => {
+          // Send the audio data to the renderer process with session ID
+          if (!mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("audio-data", {
+              buffer,
+              format,
+              sessionId: options.sessionId,
+            });
+          }
+        });
+      } catch (error) {
+        console.error("Error starting audio capture:", error);
+        throw error;
+      }
     }
-  });
+  );
 
   ipcMain.handle("stop-audio-capture", () => {
     try {
