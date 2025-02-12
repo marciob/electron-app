@@ -72,8 +72,9 @@
     
     // Ensure we're on the main queue for thread safety
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Release JS callback first to prevent any new data from being sent
+        // Immediately invalidate any pending data
         if (self.jsCallback) {
+            self.jsCallback.Abort();
             self.jsCallback.Release();
             self.jsCallback = nullptr;
         }

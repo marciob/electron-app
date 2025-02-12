@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { FaMicrophone } from "react-icons/fa";
 import { IoMdVolumeHigh } from "react-icons/io";
 
@@ -33,18 +33,14 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const recordingStartTimeRef = useRef<number>(0);
   const recordingSessionId = useRef(0);
 
-  useEffect(() => {
-    // Initialize audio context
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext();
-    }
+  const handleAudioData = useCallback(
+    (data: { buffer: Buffer; format: any; sessionId: number }) => {
+      // Add early rejection for stale chunks
+      if (data.sessionId < recordingSessionId.current) {
+        console.log(`Rejecting stale chunk from session ${data.sessionId}`);
+        return;
+      }
 
-    // Set up IPC listener for audio data
-    const handleAudioData = (data: {
-      buffer: Buffer;
-      format: any;
-      sessionId: number;
-    }) => {
       // Add buffer validation
       if (!data.buffer || data.buffer.length === 0) {
         console.error("Received empty audio buffer");
@@ -143,16 +139,16 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
           `Wall clock time: ${wallClockTime.toFixed(2)}s, ` +
           `Drift: ${(theoreticalDuration - wallClockTime).toFixed(3)}s`
       );
-    };
+    },
+    [isRecording, audioFormat]
+  );
 
-    // Add the event listener
+  useEffect(() => {
     window.electron.ipcRenderer.on("audio-data", handleAudioData);
-
-    // Return cleanup function
     return () => {
       window.electron.ipcRenderer.removeListener("audio-data", handleAudioData);
     };
-  }, [isRecording]); // Only recreate when isRecording changes
+  }, [handleAudioData]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
@@ -192,11 +188,13 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setIsProcessing(true);
 
     try {
+      // Force reset before any operations
+      recordingSessionId.current += 1;
+      const currentSessionId = recordingSessionId.current;
+
       // Reset all state variables aggressively
       audioChunksRef.current = [];
       recordingStartTimeRef.current = Date.now();
-      recordingSessionId.current += 1;
-      const currentSessionId = recordingSessionId.current;
 
       // Reset UI state
       setTimer(0);

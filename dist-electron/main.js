@@ -57,10 +57,8 @@ function createWindow() {
   };
   const initAudioCapture = () => {
     try {
-      if (!audioCapture) {
-        audioCapture = new SystemAudioCapture();
-        console.log("Native module loaded successfully");
-      }
+      audioCapture = new SystemAudioCapture();
+      console.log("New native module instance created");
     } catch (error) {
       console.error("Failed to load native module:", error);
       throw error;
@@ -84,6 +82,7 @@ function createWindow() {
             (_, reject) => setTimeout(() => reject(new Error("Stop capture timeout")), 1e3)
           )
         ]);
+        await new Promise((resolve) => setTimeout(resolve, 100));
         const oldCapture = audioCapture;
         audioCapture = null;
         if (oldCapture.jsCallback) {
