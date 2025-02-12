@@ -109,12 +109,16 @@ function createWindow() {
         // Add cooldown to ensure native resources release
         await new Promise((resolve) => setTimeout(resolve, 100));
 
-        // Cleanup after successful stop
+        // Force cleanup of old instance
         const oldCapture = audioCapture;
         audioCapture = null;
+
+        // Cleanup callback reference
         if (oldCapture.jsCallback) {
           oldCapture.jsCallback = null;
         }
+
+        console.log("Capture instance cleanup completed");
       } catch (error) {
         console.error("Error stopping capture:", error);
         // Ensure cleanup even on error

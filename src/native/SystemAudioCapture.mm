@@ -12,6 +12,20 @@
 
 - (void)startCapture {
     NSLog(@"Starting audio capture...");
+    
+    // If there's an existing stream, stop it first
+    if (self.stream) {
+        NSLog(@"Stopping existing stream before starting new capture");
+        [self stopCaptureWithCompletion:^{
+            [self initializeNewCapture];
+        }];
+        return;
+    }
+    
+    [self initializeNewCapture];
+}
+
+- (void)initializeNewCapture {
     [SCShareableContent getShareableContentWithCompletionHandler:^(
         SCShareableContent *content, NSError *error
     ) {

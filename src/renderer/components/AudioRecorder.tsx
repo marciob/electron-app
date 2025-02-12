@@ -41,6 +41,16 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         return;
       }
 
+      // Early return if not recording or session mismatch
+      if (!isRecording || data.sessionId !== recordingSessionId.current) {
+        console.log(
+          `Skipping audio chunk - Recording: ${isRecording}, ` +
+            `Session current: ${recordingSessionId.current}, ` +
+            `Chunk session: ${data.sessionId}`
+        );
+        return;
+      }
+
       // Add buffer validation
       if (!data.buffer || data.buffer.length === 0) {
         console.error("Received empty audio buffer");
@@ -52,16 +62,6 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       if (data.buffer.length % expectedBytesPerSample !== 0) {
         console.error(
           `Invalid buffer length: ${data.buffer.length} bytes for ${expectedBytesPerSample} bytes/sample`
-        );
-        return;
-      }
-
-      // Early return if not recording or session mismatch
-      if (!isRecording || data.sessionId !== recordingSessionId.current) {
-        console.log(
-          `Skipping audio chunk - Recording: ${isRecording}, ` +
-            `Session current: ${recordingSessionId.current}, ` +
-            `Chunk session: ${data.sessionId}`
         );
         return;
       }
@@ -81,14 +81,6 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       const bytesPerSample = data.format.bitsPerChannel / 8;
       const sampleCount = data.buffer.length / bytesPerSample;
 
-      console.log(
-        `Processing chunk - Bytes: ${data.buffer.length}, ` +
-          `Bytes per sample: ${bytesPerSample}, ` +
-          `Sample count: ${sampleCount}, ` +
-          `Sample rate: ${data.format.sampleRate}Hz, ` +
-          `Channels: ${data.format.channels}`
-      );
-
       // Create Int16Array from the buffer
       const int16Array = new Int16Array(
         data.buffer.buffer,
@@ -104,43 +96,26 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         float32Array[i] = int16Array[i] * scale;
       }
 
-      // Log buffer statistics
-      let maxSample = 0;
-      let minSample = 0;
-      for (let i = 0; i < float32Array.length; i++) {
-        if (float32Array[i] > maxSample) maxSample = float32Array[i];
-        if (float32Array[i] < minSample) minSample = float32Array[i];
-      }
-
-      console.log(
-        `Chunk statistics - ` +
-          `Max: ${maxSample.toFixed(6)}, ` +
-          `Min: ${minSample.toFixed(6)}, ` +
-          `Duration: ${(sampleCount / data.format.sampleRate).toFixed(3)}s`
-      );
-
       // Store the converted buffer
       audioChunksRef.current.push(float32Array);
 
-      // Log accumulated buffer info
+      // Log detailed statistics
       const totalSamples = audioChunksRef.current.reduce(
         (acc, chunk) => acc + chunk.length,
         0
       );
-
       const wallClockTime = (Date.now() - recordingStartTimeRef.current) / 1000;
       const theoreticalDuration = totalSamples / data.format.sampleRate;
 
       console.log(
-        `Recording progress - ` +
+        `Chunk processed - ` +
+          `Size: ${sampleCount} samples, ` +
           `Total chunks: ${audioChunksRef.current.length}, ` +
-          `Total samples: ${totalSamples}, ` +
-          `Theoretical duration: ${theoreticalDuration.toFixed(2)}s, ` +
-          `Wall clock time: ${wallClockTime.toFixed(2)}s, ` +
-          `Drift: ${(theoreticalDuration - wallClockTime).toFixed(3)}s`
+          `Total duration: ${theoreticalDuration.toFixed(3)}s, ` +
+          `Wall time: ${wallClockTime.toFixed(3)}s`
       );
     },
-    [isRecording, audioFormat]
+    [isRecording] // Only depend on recording state
   );
 
   useEffect(() => {
@@ -188,13 +163,21 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setIsProcessing(true);
 
     try {
-      // Force reset before any operations
+      // Aggressive cleanup first
+      if (audioContextRef.current) {
+        try {
+          await audioContextRef.current.close();
+        } catch (error) {
+          console.warn("Error closing existing audio context:", error);
+        }
+        audioContextRef.current = null;
+      }
+
+      // Clear any existing chunks and reset state
+      audioChunksRef.current = [];
+      recordingStartTimeRef.current = 0;
       recordingSessionId.current += 1;
       const currentSessionId = recordingSessionId.current;
-
-      // Reset all state variables aggressively
-      audioChunksRef.current = [];
-      recordingStartTimeRef.current = Date.now();
 
       // Reset UI state
       setTimer(0);
@@ -202,49 +185,42 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       setIsRecordingSystem(false);
       setAudioFormat({ sampleRate: 48000, channels: 1 });
 
-      // Force cleanup of audio context
-      if (audioContextRef.current) {
-        try {
-          await audioContextRef.current.close();
-        } catch (error) {
-          console.warn("Error closing audio context:", error);
-        }
-        audioContextRef.current = null;
-      }
-
       // Create new context with explicit sample rate
       audioContextRef.current = new AudioContext({
         sampleRate: 48000, // Force 48kHz to match native audio
       });
 
       console.log(
-        `New recording session ${currentSessionId}:`,
-        `\n- Start time: ${new Date(
-          recordingStartTimeRef.current
-        ).toISOString()}`,
+        `Starting new recording session ${currentSessionId}:`,
         `\n- Audio context sample rate: ${audioContextRef.current.sampleRate}Hz`,
         `\n- Initial format: 48000Hz, 1 channel`
       );
 
-      // Start the capture
+      // Start the capture first
       await window.electron.ipcRenderer.invoke("start-audio-capture", {
         sessionId: currentSessionId,
         system: true,
         mic: false,
       });
 
-      // Update recording state
+      // Only after capture is started, set the recording state and start time
+      recordingStartTimeRef.current = Date.now();
       setIsRecording(true);
       setIsRecordingSystem(true);
 
-      console.log(`Recording started - Session ID: ${currentSessionId}`);
+      console.log(
+        `Recording started successfully:`,
+        `\n- Session ID: ${currentSessionId}`,
+        `\n- Start time: ${new Date(
+          recordingStartTimeRef.current
+        ).toISOString()}`
+      );
     } catch (error) {
       console.error("Failed to start recording:", error);
 
       // Aggressive cleanup on error
       audioChunksRef.current = [];
       recordingStartTimeRef.current = 0;
-      recordingSessionId.current = Math.max(0, recordingSessionId.current);
 
       // Reset audio context
       if (audioContextRef.current) {

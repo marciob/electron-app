@@ -88,6 +88,7 @@ function createWindow() {
         if (oldCapture.jsCallback) {
           oldCapture.jsCallback = null;
         }
+        console.log("Capture instance cleanup completed");
       } catch (error) {
         console.error("Error stopping capture:", error);
         audioCapture = null;
