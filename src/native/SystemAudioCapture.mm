@@ -33,9 +33,8 @@
         if (@available(macOS 13.0, *)) {
             config.capturesAudio = YES;
             config.excludesCurrentProcessAudio = YES;
-            config.sampleRate = 44100;  // Match Web Audio API rate
             config.channelCount = 1;    // Mono audio
-            NSLog(@"Configured audio capture: %d Hz, %d channels", 44100, 1);
+            NSLog(@"Configured audio capture with mono audio");
         }
 
         self.stream = [[SCStream alloc] 

@@ -11,6 +11,8 @@ interface Recording {
   blob: Blob;
   url: string;
   timestamp: Date;
+  sampleRate: number;
+  channels: number;
 }
 
 const AudioRecorder: React.FC<AudioRecorderProps> = ({
@@ -21,6 +23,10 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const [isRecordingSystem, setIsRecordingSystem] = useState(false);
   const [timer, setTimer] = useState(0);
   const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [audioFormat, setAudioFormat] = useState<{
+    sampleRate: number;
+    channels: number;
+  }>({ sampleRate: 44100, channels: 1 });
   const audioChunksRef = useRef<Float32Array[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -30,12 +36,12 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
     // Set up IPC listener for audio data
     const handleAudioData = (buffer: Buffer, format: any) => {
-      console.log(
-        "Received audio chunk:",
-        buffer.byteLength,
-        "Format:",
-        format
-      );
+      console.log("Received audio format:", format);
+      setAudioFormat({
+        sampleRate: format.sampleRate,
+        channels: format.channels,
+      });
+
       if (isRecording) {
         // Convert 16-bit PCM to 32-bit float
         const int16Array = new Int16Array(buffer.buffer);
@@ -127,11 +133,11 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         offset += chunk.length;
       });
 
-      // Create audio buffer
+      // Create audio buffer with correct sample rate
       const audioBuffer = audioContextRef.current!.createBuffer(
-        1, // mono
+        audioFormat.channels,
         combinedArray.length,
-        44100 // sample rate
+        audioFormat.sampleRate // Use actual sample rate
       );
       audioBuffer.getChannelData(0).set(combinedArray);
 
@@ -141,12 +147,14 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       // Create URL for the blob
       const url = URL.createObjectURL(wavBlob);
 
-      // Add to recordings list
+      // Add to recordings list with format info
       const newRecording: Recording = {
         id: Date.now(),
         blob: wavBlob,
         url,
         timestamp: new Date(),
+        sampleRate: audioFormat.sampleRate,
+        channels: audioFormat.channels,
       };
 
       setRecordings((prev) => [newRecording, ...prev]);
@@ -162,10 +170,9 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     }
   };
 
-  // Helper function to convert AudioBuffer to WAV blob
   const audioBufferToWav = (buffer: AudioBuffer): Promise<Blob> => {
-    const numChannels = 1;
-    const sampleRate = buffer.sampleRate;
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate; // Use actual sample rate
     const format = 1; // PCM
     const bitDepth = 16;
 
@@ -274,6 +281,9 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 <div className="flex items-center gap-4">
                   <span className="text-gray-600">
                     {formatTimestamp(recording.timestamp)}
+                  </span>
+                  <span className="text-sm text-gray-500">
+                    {recording.sampleRate / 1000}kHz {recording.channels}ch
                   </span>
                   <audio controls src={recording.url} className="h-8" />
                 </div>
