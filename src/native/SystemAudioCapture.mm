@@ -6,12 +6,18 @@
 @interface AudioCapturer : NSObject <SCStreamDelegate, SCStreamOutput>
 @property (strong) SCStream *stream;
 @property (nonatomic) Napi::ThreadSafeFunction jsCallback;
+@property (assign) CMClockRef presentationClock;
+@property (assign) CMTime basePresentationTimeStamp;
+@property (assign) uint64_t startTimestamp;
 @end
 
 @implementation AudioCapturer
 
 - (void)startCapture {
     NSLog(@"Starting audio capture...");
+    
+    // Initialize timing
+    self.startTimestamp = CMClockGetTime(CMClockGetHostTimeClock()).value;
     
     // If there's an existing stream, stop it first
     if (self.stream) {
@@ -82,6 +88,19 @@
 }
 
 - (void)stopCaptureWithCompletion:(void (^)(void))completion {
+    // Reset temporal state
+    self.presentationClock = NULL;
+    self.basePresentationTimeStamp = kCMTimeZero;
+    
+    // Force buffer flush
+    if (@available(macOS 13.0, *)) {
+        [self.stream flushWithCompletionHandler:^{
+            // Ensure 100ms buffer for final samples
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), 
+                dispatch_get_main_queue(), completion);
+        }];
+    }
+    
     NSLog(@"Stopping audio capture...");
     
     // Ensure we're on the main queue for thread safety
@@ -135,6 +154,26 @@
     ofType:(SCStreamOutputType)type API_AVAILABLE(macos(13.0)) {
     
     if (type != SCStreamOutputTypeAudio || !self.jsCallback) return;
+
+    // Get precise timestamp from sample buffer
+    CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+    uint64_t timestamp = (presentationTime.value * 1000000000) / presentationTime.timescale;
+    
+    // Calculate relative timestamp from start
+    uint64_t relativeTimestamp = timestamp - self.startTimestamp;
+    
+    NSLog(@"Audio chunk timestamp: %llu ns (relative: %llu ns)", timestamp, relativeTimestamp);
+
+    // Initialize presentation clock if needed
+    if (!self.presentationClock) {
+        self.presentationClock = CMClockGetHostTimeClock();
+        self.basePresentationTimeStamp = CMClockGetTime(self.presentationClock);
+    }
+
+    CMItemCount numSamples = CMSampleBufferGetNumSamples(sampleBuffer);
+    CMTime duration = CMSampleBufferGetDuration(sampleBuffer);
+    CMTime presentationTime = CMTimeAdd(self.basePresentationTimeStamp, duration);
+    self.basePresentationTimeStamp = presentationTime;
 
     // Get audio format details
     CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
@@ -275,14 +314,28 @@
     
     free(buffer);
 
-    self.jsCallback.BlockingCall([pcmBuffer, sampleCount, asbd](Napi::Env env, Napi::Function jsCallback) {
-        auto audioBuffer = Napi::Buffer<int16_t>::Copy(env, pcmBuffer, sampleCount);
-        auto formatObj = Napi::Object::New(env);
+    self.jsCallback.BlockingCall([buffer, length, asbd, pcmBuffer, sampleCount, relativeTimestamp](Napi::Env env, Napi::Function jsCallback) {
+        // Create format object
+        Napi::Object formatObj = Napi::Object::New(env);
         formatObj.Set("sampleRate", Napi::Number::New(env, asbd->mSampleRate));
         formatObj.Set("channels", Napi::Number::New(env, asbd->mChannelsPerFrame));
-        formatObj.Set("bitsPerChannel", Napi::Number::New(env, 16)); // We're always converting to 16-bit
-        jsCallback.Call({audioBuffer, formatObj});
+        
+        // Create buffer from PCM data
+        Napi::Buffer<uint8_t> audioBuffer = Napi::Buffer<uint8_t>::Copy(
+            env,
+            reinterpret_cast<uint8_t*>(pcmBuffer),
+            sampleCount * sizeof(int16_t)
+        );
+        
+        // Call JavaScript with buffer, format, and timestamp
+        jsCallback.Call({
+            audioBuffer, 
+            formatObj, 
+            Napi::Number::New(env, static_cast<double>(relativeTimestamp))
+        });
+        
         free(pcmBuffer);
+        free(buffer);
     });
 }
 

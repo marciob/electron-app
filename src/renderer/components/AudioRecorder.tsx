@@ -15,6 +15,11 @@ interface Recording {
   channels: number;
 }
 
+interface AudioChunk {
+  data: Float32Array;
+  timestamp: number; // Nanosecond precision
+}
+
 const AudioRecorder: React.FC<AudioRecorderProps> = ({
   onRecordingComplete,
 }) => {
@@ -28,54 +33,139 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     sampleRate: number;
     channels: number;
   }>({ sampleRate: 44100, channels: 1 });
-  const audioChunksRef = useRef<Float32Array[]>([]);
+  const audioChunksRef = useRef<AudioChunk[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
   const recordingStartTimeRef = useRef<number>(0);
   const recordingSessionId = useRef(0);
+  const sampleRate = 48000;
+
+  const processAudioChunks = (chunks: AudioChunk[]) => {
+    if (chunks.length === 0) {
+      console.warn("No audio chunks to process");
+      return new Float32Array(1);
+    }
+
+    // Sort chunks by hardware timestamp
+    const sorted = [...chunks].sort((a, b) => a.timestamp - b.timestamp);
+
+    // Calculate total duration using hardware timestamps
+    const firstTimestamp = sorted[0].timestamp;
+    const lastTimestamp = sorted[sorted.length - 1].timestamp;
+    const totalDuration = (lastTimestamp - firstTimestamp) / 1e9;
+
+    // Add minimal padding
+    const paddingDuration = 0.02; // 20ms padding
+    const totalSamples = Math.ceil(
+      (totalDuration + paddingDuration) * sampleRate
+    );
+
+    console.log(
+      `Processing audio chunks:`,
+      `\n- Total chunks: ${chunks.length}`,
+      `\n- Duration: ${totalDuration.toFixed(4)}s`,
+      `\n- Samples: ${totalSamples}`,
+      `\n- Sample rate: ${sampleRate}`
+    );
+
+    // Create buffer with padding
+    const buffer = new Float32Array(totalSamples);
+    let lastChunkEnd = 0;
+
+    // Use gentler crossfading
+    const FADE_DURATION = 0.005; // 5ms crossfade
+    const FADE_SAMPLES = Math.floor(FADE_DURATION * sampleRate);
+
+    for (let i = 0; i < sorted.length; i++) {
+      const chunk = sorted[i];
+      const chunkStart = Math.round(
+        ((chunk.timestamp - firstTimestamp) / 1e9) * sampleRate
+      );
+
+      if (chunkStart < 0) continue;
+
+      // Calculate overlap with previous chunk
+      const overlap = lastChunkEnd - chunkStart;
+      const processedData = new Float32Array(chunk.data);
+
+      if (overlap > 0 && i > 0) {
+        // Simple linear crossfade for overlapping regions
+        const fadeLength = Math.min(overlap, FADE_SAMPLES);
+        for (let j = 0; j < fadeLength; j++) {
+          const fadeIn = j / fadeLength;
+          const fadeOut = 1 - fadeIn;
+          const pos = chunkStart + j;
+          if (pos >= 0 && pos < buffer.length) {
+            buffer[pos] = buffer[pos] * fadeOut + processedData[j] * fadeIn;
+          }
+        }
+
+        // Copy remaining samples
+        const remainingSamples = Math.min(
+          processedData.length - fadeLength,
+          buffer.length - (chunkStart + fadeLength)
+        );
+        if (remainingSamples > 0) {
+          buffer.set(
+            processedData.subarray(fadeLength, fadeLength + remainingSamples),
+            chunkStart + fadeLength
+          );
+        }
+      } else {
+        // No crossfading for non-overlapping chunks
+        const samplesToWrite = Math.min(
+          processedData.length,
+          buffer.length - chunkStart
+        );
+        if (samplesToWrite > 0) {
+          buffer.set(processedData.subarray(0, samplesToWrite), chunkStart);
+        }
+      }
+
+      lastChunkEnd = chunkStart + processedData.length;
+    }
+
+    // Simple peak normalization if needed
+    let maxLevel = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      maxLevel = Math.max(maxLevel, Math.abs(buffer[i]));
+    }
+
+    if (maxLevel > 1) {
+      const scale = 0.99 / maxLevel;
+      for (let i = 0; i < buffer.length; i++) {
+        buffer[i] *= scale;
+      }
+    }
+
+    return buffer;
+  };
 
   const handleAudioData = useCallback(
-    (data: { buffer: Buffer; format: any; sessionId: number }) => {
-      // Check if we're actively recording and session matches
-      if (!isRecording || data.sessionId !== recordingSessionId.current) {
+    (data: {
+      buffer: Buffer;
+      format: any;
+      timestamp: number;
+      sessionId: number;
+    }) => {
+      // Only check session ID match, not isRecording state
+      if (data.sessionId !== recordingSessionId.current) {
         console.log(
-          `Skipping chunk - Recording: ${isRecording}, Session: ${data.sessionId} vs ${recordingSessionId.current}`
+          `Skipping chunk - Session mismatch: ${data.sessionId} vs ${recordingSessionId.current}`
         );
         return;
       }
 
-      // Add time-based validation
-      const chunkTime = Date.now();
-      const recordingTime = chunkTime - recordingStartTimeRef.current;
-      const expectedSamples = Math.ceil(
-        (recordingTime / 1000) * data.format.sampleRate
-      );
-      const currentSamples = audioChunksRef.current.reduce(
-        (acc, chunk) => acc + chunk.length,
-        0
-      );
+      // Validate timestamp
+      const timestamp =
+        typeof data.timestamp === "number" ? data.timestamp : Date.now() * 1e6;
 
-      // If we've already processed more samples than we should have based on time, skip this chunk
-      if (currentSamples > expectedSamples) {
-        console.log(
-          `Skipping excess chunk - Current samples: ${currentSamples}, Expected: ${expectedSamples}`
-        );
-        return;
-      }
-
-      // Add buffer validation
-      if (!data.buffer || data.buffer.length === 0) {
-        console.error("Received empty audio buffer");
-        return;
-      }
-
-      // Convert buffer using correct byte interpretation
+      // Convert buffer to Float32Array
       const int16Array = new Int16Array(
         data.buffer.buffer,
         data.buffer.byteOffset,
         data.buffer.length / 2
       );
 
-      // Convert to float32 for consistent processing
       const float32Array = new Float32Array(int16Array.length);
       const scale = 1.0 / 32768.0;
 
@@ -83,27 +173,35 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         float32Array[i] = int16Array[i] * scale;
       }
 
-      // Store the converted buffer
-      audioChunksRef.current.push(float32Array);
+      // Store chunk with timestamp
+      audioChunksRef.current.push({
+        data: float32Array,
+        timestamp,
+      });
 
-      // Log statistics for debugging
-      const totalSamples = audioChunksRef.current.reduce(
-        (acc, chunk) => acc + chunk.length,
-        0
-      );
-      const wallClockTime = (Date.now() - recordingStartTimeRef.current) / 1000;
-      const theoreticalDuration = totalSamples / data.format.sampleRate;
+      // Log timing information
+      const firstChunk = audioChunksRef.current[0];
+      const lastChunk =
+        audioChunksRef.current[audioChunksRef.current.length - 1];
 
-      console.log(
-        `Chunk processed - ` +
-          `Size: ${float32Array.length} samples, ` +
-          `Total chunks: ${audioChunksRef.current.length}, ` +
-          `Total samples: ${totalSamples}, ` +
-          `Wall time: ${wallClockTime.toFixed(3)}s, ` +
-          `Theoretical: ${theoreticalDuration.toFixed(3)}s`
-      );
+      if (firstChunk && lastChunk) {
+        const hardwareDuration =
+          (lastChunk.timestamp - firstChunk.timestamp) / 1e9;
+        const wallClockDuration =
+          (Date.now() - recordingStartTimeRef.current) / 1000;
+
+        console.log(
+          `Recording stats:`,
+          `\n- Chunk size: ${float32Array.length} samples`,
+          `\n- Timestamp: ${timestamp}`,
+          `\n- Hardware duration: ${hardwareDuration.toFixed(4)}s`,
+          `\n- Wall clock duration: ${wallClockDuration.toFixed(4)}s`,
+          `\n- Drift: ${(hardwareDuration - wallClockDuration).toFixed(4)}s`,
+          `\n- Chunks: ${audioChunksRef.current.length}`
+        );
+      }
     },
-    [isRecording]
+    [] // Remove isRecording from dependencies
   );
 
   useEffect(() => {
@@ -170,20 +268,18 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setIsProcessing(true);
 
     try {
-      // Ensure complete cleanup of previous recording state
-      await window.electron.ipcRenderer.invoke("stop-audio-capture");
-      await new Promise((resolve) => setTimeout(resolve, 500)); // Add delay for cleanup
+      // Set recording state first to ensure we don't miss initial chunks
+      setIsRecording(true);
+      setIsRecordingSystem(true);
+      recordingStartTimeRef.current = Date.now();
 
       // Reset all state
       audioChunksRef.current = [];
-      recordingStartTimeRef.current = 0;
       recordingSessionId.current += 1;
       const currentSessionId = recordingSessionId.current;
 
       // Reset UI state
       setTimer(0);
-      setIsRecording(false);
-      setIsRecordingSystem(false);
       setAudioFormat({ sampleRate: 48000, channels: 1 });
 
       // Create new audio context
@@ -205,11 +301,6 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         system: true,
         mic: false,
       });
-
-      // Set recording state
-      recordingStartTimeRef.current = Date.now();
-      setIsRecording(true);
-      setIsRecordingSystem(true);
     } catch (error) {
       console.error("Failed to start recording:", error);
       await cleanupRecording();
@@ -221,134 +312,68 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
   const stopRecording = async () => {
     if (!isRecording) return;
-
-    // Set processing state to prevent multiple stops
     setIsProcessing(true);
 
     try {
-      const recordingEndTime = Date.now();
-      const recordingDuration =
-        (recordingEndTime - recordingStartTimeRef.current) / 1000;
-      console.log(
-        `Recording stopped - Wall clock duration: ${recordingDuration.toFixed(
-          2
-        )}s`
-      );
-
-      // Stop the capture first
-      const currentSessionId = recordingSessionId.current;
       await window.electron.ipcRenderer.invoke("stop-audio-capture");
-
-      // Reset recording states immediately
       setIsRecording(false);
       setIsRecordingSystem(false);
       setTimer(0);
 
-      // Check if we have any audio data
       if (audioChunksRef.current.length === 0) {
         throw new Error("No audio data was recorded");
       }
 
-      // Calculate actual recording duration from samples
-      const actualSamples = audioChunksRef.current.reduce(
-        (acc, chunk) => acc + chunk.length,
-        0
-      );
-      const theoreticalDuration = actualSamples / audioFormat.sampleRate;
-      console.log(
-        `Processing recording:`,
-        `\n- Total chunks: ${audioChunksRef.current.length}`,
-        `\n- Total samples: ${actualSamples}`,
-        `\n- Sample rate: ${audioFormat.sampleRate}Hz`,
-        `\n- Channels: ${audioFormat.channels}`,
-        `\n- Theoretical duration: ${theoreticalDuration.toFixed(2)}s`,
-        `\n- Wall clock duration: ${recordingDuration.toFixed(2)}s`,
-        `\n- Duration difference: ${(
-          theoreticalDuration - recordingDuration
-        ).toFixed(2)}s`
-      );
+      // Process chunks with temporal alignment
+      const alignedBuffer = processAudioChunks(audioChunksRef.current);
 
-      // Create a new audio context for processing
-      const processingContext = new AudioContext();
-      console.log(
-        `Processing context sample rate: ${processingContext.sampleRate}Hz`
-      );
+      if (alignedBuffer.length === 0) {
+        throw new Error("Failed to process audio chunks");
+      }
 
-      // Combine all audio chunks
-      const combinedArray = new Float32Array(actualSamples);
-      let offset = 0;
-
-      audioChunksRef.current.forEach((chunk, index) => {
-        console.log(
-          `Combining chunk ${index + 1}/${audioChunksRef.current.length}:`,
-          `size: ${chunk.length} samples,`,
-          `offset: ${offset}`
-        );
-        combinedArray.set(chunk, offset);
-        offset += chunk.length;
-      });
-
-      // Create audio buffer with actual samples
+      // Create audio buffer with exact duration
       const audioBuffer = new AudioBuffer({
-        length: actualSamples,
-        numberOfChannels: audioFormat.channels,
-        sampleRate: audioFormat.sampleRate,
+        length: Math.max(alignedBuffer.length, 1), // Ensure at least 1 sample
+        numberOfChannels: 1,
+        sampleRate: sampleRate,
       });
 
-      console.log(
-        `Created AudioBuffer:`,
-        `\n- Length: ${audioBuffer.length} samples`,
-        `\n- Duration: ${audioBuffer.duration.toFixed(2)}s`,
-        `\n- Sample rate: ${audioBuffer.sampleRate}Hz`,
-        `\n- Channels: ${audioBuffer.numberOfChannels}`
-      );
+      // Copy the aligned data
+      try {
+        audioBuffer.getChannelData(0).set(alignedBuffer);
+        console.log(
+          `Created AudioBuffer:`,
+          `\n- Length: ${audioBuffer.length} samples`,
+          `\n- Duration: ${audioBuffer.duration.toFixed(4)}s`,
+          `\n- Sample rate: ${audioBuffer.sampleRate}Hz`
+        );
+      } catch (error) {
+        console.error("Error setting audio buffer data:", error);
+        throw error;
+      }
 
-      // Set the normalized data
-      audioBuffer.getChannelData(0).set(combinedArray);
-
-      // Convert to WAV
+      // Convert to WAV and save
       const wavBlob = await audioBufferToWav(audioBuffer);
-      console.log(`WAV blob size: ${wavBlob.size} bytes`);
-
-      // Clean up processing context
-      await processingContext.close();
-
-      // Create URL for the blob
       const url = URL.createObjectURL(wavBlob);
 
-      // Add to recordings list with format info
       const newRecording: Recording = {
         id: Date.now(),
         blob: wavBlob,
         url,
         timestamp: new Date(),
-        sampleRate: audioFormat.sampleRate,
-        channels: audioFormat.channels,
+        sampleRate,
+        channels: 1,
       };
 
-      // Only update if we're still in the same session
-      if (currentSessionId === recordingSessionId.current) {
-        setRecordings((prev) => [newRecording, ...prev]);
-
-        if (onRecordingComplete) {
-          onRecordingComplete(wavBlob);
-        }
+      setRecordings((prev) => [...prev, newRecording]);
+      if (onRecordingComplete) {
+        onRecordingComplete(wavBlob);
       }
     } catch (error) {
-      console.error("Failed to stop recording:", error);
-      // Ensure states are reset even on error
-      setIsRecording(false);
-      setIsRecordingSystem(false);
-      setTimer(0);
-      alert(
-        error instanceof Error ? error.message : "Failed to stop recording"
-      );
+      console.error("Error stopping recording:", error);
     } finally {
       setIsProcessing(false);
-      // Clear the audio chunks if we're not keeping the recording
-      if (!isRecording) {
-        audioChunksRef.current = [];
-      }
+      audioChunksRef.current = [];
     }
   };
 
@@ -384,18 +409,13 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     writeString(view, 36, "data");
     view.setUint32(40, dataLength, true);
 
-    // Write audio data with dithering
+    // Simple conversion without dithering or noise shaping
     const channelData = buffer.getChannelData(0);
     let offset = 44;
 
-    const dither = (sample: number) => {
-      return sample + (Math.random() * 2 - 1) / 32768;
-    };
-
     for (let i = 0; i < channelData.length; i++) {
-      let sample = dither(channelData[i]);
-      sample = Math.max(-1.0, Math.min(1.0, sample));
-      const pcmValue = Math.round(sample * 32767);
+      const sample = Math.max(-1, Math.min(1, channelData[i]));
+      const pcmValue = Math.floor(sample * 32767);
       view.setInt16(offset, pcmValue, true);
       offset += 2;
     }
