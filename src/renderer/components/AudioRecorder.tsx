@@ -53,11 +53,121 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const recordingStartTimeRef = useRef<number>(0);
   const recordingSessionId = useRef(0);
   const nonSilentDetectedRef = useRef(false);
-  const lastChunkTimestampRef = useRef<number>(0);
+  const processingQueueRef = useRef<Float32Array[]>([]);
+  const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Setup recording effect
+  const processAudioChunk = useCallback((chunk: Float32Array) => {
+    if (!nonSilentDetectedRef.current) {
+      // Calculate RMS for silence detection
+      let rms = 0;
+      for (let i = 0; i < chunk.length; i++) {
+        rms += chunk[i] * chunk[i];
+      }
+      rms = Math.sqrt(rms / chunk.length);
+
+      if (rms >= 0.001) {
+        console.log(
+          `🎵 Non-silent audio detected in chunk #${audioChunksRef.current.length}, RMS: ${rms}`
+        );
+        nonSilentDetectedRef.current = true;
+      } else {
+        console.log(
+          `⏭ Skipping silent chunk #${audioChunksRef.current.length}, RMS: ${rms}`
+        );
+        return;
+      }
+    }
+
+    // Add to processing queue
+    processingQueueRef.current.push(chunk);
+
+    // Schedule processing if not already scheduled
+    if (!processingTimeoutRef.current) {
+      processingTimeoutRef.current = setTimeout(() => {
+        const chunks = processingQueueRef.current;
+        processingQueueRef.current = [];
+        processingTimeoutRef.current = null;
+
+        // Process all queued chunks
+        chunks.forEach((chunk) => {
+          audioChunksRef.current.push(chunk);
+          analyzeAudioBuffer(chunk, audioChunksRef.current.length - 1);
+        });
+      }, 5); // Process chunks every 5ms
+    }
+  }, []);
+
+  const handleAudioData = useCallback(
+    (data: { buffer: Buffer; format: any; sessionId: number }) => {
+      if (!isRecording || data.sessionId !== recordingSessionId.current) {
+        return;
+      }
+
+      const timestamp = new Date().toISOString();
+      const timeSinceStart = recordingStartTimeRef.current
+        ? performance.now() - recordingStartTimeRef.current
+        : "N/A";
+
+      console.log(
+        `🔍 [Chunk ${audioChunksRef.current.length}] Audio chunk received at ${timestamp}:`,
+        `\n- Recording state: ${isRecording} (${
+          isRecording ? "ACTIVE" : "INACTIVE"
+        })`,
+        `\n- Session match: ${data.sessionId} vs ${
+          recordingSessionId.current
+        } (${
+          data.sessionId === recordingSessionId.current ? "MATCH" : "MISMATCH"
+        })`,
+        `\n- Buffer size: ${data.buffer.length} bytes`,
+        `\n- Format:`,
+        data.format,
+        `\n- Time since start: ${
+          typeof timeSinceStart === "number"
+            ? `${timeSinceStart}ms`
+            : timeSinceStart
+        }`,
+        `\n- nonSilentDetected: ${nonSilentDetectedRef.current}`
+      );
+
+      // Convert buffer to float32
+      const int16Array = new Int16Array(
+        data.buffer.buffer,
+        data.buffer.byteOffset,
+        data.buffer.length / 2
+      );
+      const float32Array = new Float32Array(int16Array.length);
+      const scale = 1.0 / 32768.0;
+
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] * scale;
+      }
+
+      processAudioChunk(float32Array);
+
+      // Log statistics for debugging
+      const totalSamples = audioChunksRef.current.reduce(
+        (acc, chunk) => acc + chunk.length,
+        0
+      );
+      const wallClockTime =
+        (performance.now() - recordingStartTimeRef.current) / 1000;
+      const theoreticalDuration = totalSamples / data.format.sampleRate;
+
+      console.log(
+        `Chunk processed - ` +
+          `Size: ${float32Array.length} samples, ` +
+          `Total chunks: ${audioChunksRef.current.length}, ` +
+          `Total samples: ${totalSamples}, ` +
+          `Wall time: ${wallClockTime.toFixed(3)}s, ` +
+          `Theoretical: ${theoreticalDuration.toFixed(3)}s`
+      );
+    },
+    [isRecording, processAudioChunk]
+  );
+
   useEffect(() => {
     let cleanup = false;
+    let eventHandler: ((data: any) => void) | null = null;
 
     const setupRecording = async () => {
       if (!isRecording || cleanup) return;
@@ -74,8 +184,8 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         // Reset state
         nonSilentDetectedRef.current = false;
         audioChunksRef.current = [];
+        processingQueueRef.current = [];
         recordingStartTimeRef.current = 0;
-        lastChunkTimestampRef.current = 0;
         recordingSessionId.current += 1;
         const currentSessionId = recordingSessionId.current;
 
@@ -87,6 +197,24 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
           sampleRate: 48000,
         });
 
+        // Remove any existing event listener
+        if (eventHandler) {
+          window.electron.ipcRenderer.removeListener(
+            "audio-data",
+            eventHandler
+          );
+        }
+
+        // Create new event handler
+        eventHandler = (data: any) => {
+          if (!cleanup && isRecording && data.sessionId === currentSessionId) {
+            handleAudioData(data);
+          }
+        };
+
+        // Add new event listener
+        window.electron.ipcRenderer.on("audio-data", eventHandler);
+
         // Start the capture
         console.log("🎬 Starting audio capture...");
         await window.electron.ipcRenderer.invoke("start-audio-capture", {
@@ -96,12 +224,11 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         });
 
         if (!cleanup) {
-          // Set recording start time AFTER capture starts
-          recordingStartTimeRef.current = Date.now();
+          recordingStartTimeRef.current = performance.now();
           setAudioFormat({ sampleRate: 48000, channels: 1 });
 
           console.log("✅ Recording started successfully:", {
-            timestamp: new Date(recordingStartTimeRef.current).toISOString(),
+            timestamp: new Date().toISOString(),
             sessionId: currentSessionId,
             sampleRate: 48000,
           });
@@ -117,9 +244,14 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
     setupRecording();
 
-    // Cleanup function
     return () => {
       cleanup = true;
+      if (processingTimeoutRef.current) {
+        clearTimeout(processingTimeoutRef.current);
+      }
+      if (eventHandler) {
+        window.electron.ipcRenderer.removeListener("audio-data", eventHandler);
+      }
       const stopCapture = async () => {
         // Only stop if we're not already in the process of stopping
         if (isRecording && !isProcessing) {
@@ -141,129 +273,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       };
       stopCapture();
     };
-  }, [isRecording, isProcessing]);
-
-  const handleAudioData = useCallback(
-    (data: { buffer: Buffer; format: any; sessionId: number }) => {
-      if (!isRecording || data.sessionId !== recordingSessionId.current) {
-        return;
-      }
-
-      // Add duplicate detection based on timing
-      const currentTime = Date.now();
-      if (currentTime - lastChunkTimestampRef.current < 10) {
-        // Skip chunks that arrive within 10ms
-        console.log(
-          `⚠️ Skipping duplicate chunk arriving too soon after previous chunk`
-        );
-        return;
-      }
-      lastChunkTimestampRef.current = currentTime;
-
-      // Add detailed state logging with unique identifiers for each chunk
-      const chunkId = audioChunksRef.current.length;
-      const timestamp = new Date().toISOString();
-      const timeSinceStart = recordingStartTimeRef.current
-        ? Date.now() - recordingStartTimeRef.current
-        : "N/A";
-
-      console.log(
-        `🔍 [Chunk ${chunkId}] Audio chunk received at ${timestamp}:`,
-        `\n- Recording state: ${isRecording} (${
-          isRecording ? "ACTIVE" : "INACTIVE"
-        })`,
-        `\n- Session match: ${data.sessionId} vs ${
-          recordingSessionId.current
-        } (${
-          data.sessionId === recordingSessionId.current ? "MATCH" : "MISMATCH"
-        })`,
-        `\n- Buffer size: ${data.buffer.length} bytes`,
-        `\n- Format:`,
-        data.format,
-        `\n- Time since start: ${
-          typeof timeSinceStart === "number"
-            ? `${timeSinceStart}ms`
-            : timeSinceStart
-        }`,
-        `\n- nonSilentDetected: ${nonSilentDetectedRef.current}`
-      );
-
-      // Add buffer validation
-      if (!data.buffer || data.buffer.length === 0) {
-        console.error("❌ Received empty audio buffer");
-        return;
-      }
-
-      // Convert buffer using correct byte interpretation
-      const int16Array = new Int16Array(
-        data.buffer.buffer,
-        data.buffer.byteOffset,
-        data.buffer.length / 2
-      );
-
-      // Convert to float32 for consistent processing
-      const float32Array = new Float32Array(int16Array.length);
-      const scale = 1.0 / 32768.0;
-
-      for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] * scale;
-      }
-
-      // Calculate RMS for silence detection
-      let rms = 0;
-      for (let i = 0; i < float32Array.length; i++) {
-        rms += float32Array[i] * float32Array[i];
-      }
-      rms = Math.sqrt(rms / float32Array.length);
-
-      // Skip chunks until non-silent audio is detected
-      if (!nonSilentDetectedRef.current) {
-        if (rms >= 0.001) {
-          // Adjust threshold as needed
-          console.log(
-            `🎵 Non-silent audio detected in chunk #${audioChunksRef.current.length}, RMS: ${rms}`
-          );
-          nonSilentDetectedRef.current = true;
-        } else {
-          console.log(
-            `⏭ Skipping silent chunk #${audioChunksRef.current.length}, RMS: ${rms}`
-          );
-          return;
-        }
-      }
-
-      // Analyze the audio buffer before storing it
-      analyzeAudioBuffer(float32Array, audioChunksRef.current.length);
-
-      // Store the converted buffer
-      audioChunksRef.current.push(float32Array);
-
-      // Log statistics for debugging
-      const totalSamples = audioChunksRef.current.reduce(
-        (acc, chunk) => acc + chunk.length,
-        0
-      );
-      const wallClockTime = (Date.now() - recordingStartTimeRef.current) / 1000;
-      const theoreticalDuration = totalSamples / data.format.sampleRate;
-
-      console.log(
-        `Chunk processed - ` +
-          `Size: ${float32Array.length} samples, ` +
-          `Total chunks: ${audioChunksRef.current.length}, ` +
-          `Total samples: ${totalSamples}, ` +
-          `Wall time: ${wallClockTime.toFixed(3)}s, ` +
-          `Theoretical: ${theoreticalDuration.toFixed(3)}s`
-      );
-    },
-    [isRecording]
-  );
-
-  useEffect(() => {
-    window.electron.ipcRenderer.on("audio-data", handleAudioData);
-    return () => {
-      window.electron.ipcRenderer.removeListener("audio-data", handleAudioData);
-    };
-  }, [handleAudioData]);
+  }, [isRecording, isProcessing, handleAudioData]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
@@ -301,7 +311,9 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
     // Reset all state
     audioChunksRef.current = [];
+    processingQueueRef.current = [];
     recordingStartTimeRef.current = 0;
+    nonSilentDetectedRef.current = false;
     setIsRecording(false);
     setIsRecordingSystem(false);
     setTimer(0);
