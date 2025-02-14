@@ -333,6 +333,12 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     if (isProcessing || isRecording) return;
     setIsProcessing(true);
     try {
+      // Clean up any existing state first
+      audioChunksRef.current = [];
+      processingQueueRef.current = [];
+      recordingStartTimeRef.current = 0;
+      nonSilentDetectedRef.current = false;
+
       setIsRecording(true);
       setIsRecordingSystem(true);
       setTimer(0);
@@ -356,7 +362,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
       // Process the recording only if we have data
       if (audioChunksRef.current.length > 0) {
-        const recordingEndTime = Date.now();
+        const recordingEndTime = performance.now();
         const recordingDuration =
           (recordingEndTime - recordingStartTimeRef.current) / 1000;
         console.log(
