@@ -33,12 +33,96 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const recordingStartTimeRef = useRef<number>(0);
   const recordingSessionId = useRef(0);
 
+  // Add detailed audio buffer analysis
+  const analyzeAudioBuffer = (buffer: Float32Array, chunkIndex: number) => {
+    const totalSamples = buffer.length;
+    let maxAmplitude = 0;
+    let minAmplitude = 0;
+    let rms = 0;
+    let zeroCrossings = 0;
+    let consecutiveZeros = 0;
+    let maxConsecutiveZeros = 0;
+    let prevSample = 0;
+
+    for (let i = 0; i < totalSamples; i++) {
+      const sample = buffer[i];
+      maxAmplitude = Math.max(maxAmplitude, sample);
+      minAmplitude = Math.min(minAmplitude, sample);
+      rms += sample * sample;
+
+      // Track zero crossings and silent periods
+      if (i > 0) {
+        if (
+          (prevSample < 0 && sample >= 0) ||
+          (prevSample >= 0 && sample < 0)
+        ) {
+          zeroCrossings++;
+        }
+      }
+
+      // Track consecutive zeros (near-zero samples)
+      if (Math.abs(sample) < 0.0001) {
+        consecutiveZeros++;
+        maxConsecutiveZeros = Math.max(maxConsecutiveZeros, consecutiveZeros);
+      } else {
+        consecutiveZeros = 0;
+      }
+
+      prevSample = sample;
+    }
+
+    rms = Math.sqrt(rms / totalSamples);
+
+    console.log(
+      `🎵 Audio buffer analysis for chunk ${chunkIndex}:`,
+      `\n- Total samples: ${totalSamples}`,
+      `\n- Max amplitude: ${maxAmplitude.toFixed(6)}`,
+      `\n- Min amplitude: ${minAmplitude.toFixed(6)}`,
+      `\n- RMS: ${rms.toFixed(6)}`,
+      `\n- Zero crossings: ${zeroCrossings}`,
+      `\n- Max consecutive near-zeros: ${maxConsecutiveZeros}`,
+      `\n- First 5 samples:`,
+      buffer.slice(0, 5),
+      `\n- Last 5 samples:`,
+      buffer.slice(-5),
+      `\n- Timestamp: ${new Date().toISOString()}`
+    );
+
+    // Detect potential transition issues
+    if (maxConsecutiveZeros > totalSamples * 0.5) {
+      console.log(
+        `⚠️ Warning: Large silent period detected in chunk ${chunkIndex}`
+      );
+    }
+    if (rms < 0.0001 && chunkIndex > 0) {
+      console.log(`⚠️ Warning: Very low signal level in chunk ${chunkIndex}`);
+    }
+  };
+
   const handleAudioData = useCallback(
     (data: { buffer: Buffer; format: any; sessionId: number }) => {
+      // Add detailed state logging
+      console.log(
+        `🔍 Audio chunk received:`,
+        `\n- Current time: ${new Date().toISOString()}`,
+        `\n- Recording state: ${isRecording}`,
+        `\n- Session match: ${data.sessionId} vs ${recordingSessionId.current}`,
+        `\n- Buffer size: ${data.buffer.length} bytes`,
+        `\n- Format:`,
+        data.format,
+        `\n- Time since recording start: ${
+          recordingStartTimeRef.current
+            ? Date.now() - recordingStartTimeRef.current
+            : "N/A"
+        }ms`
+      );
+
       // Check if we're actively recording and session matches
       if (!isRecording || data.sessionId !== recordingSessionId.current) {
         console.log(
-          `Skipping chunk - Recording: ${isRecording}, Session: ${data.sessionId} vs ${recordingSessionId.current}`
+          `⏭ Skipping chunk #${audioChunksRef.current.length} - Recording: ${isRecording}, Session: ${data.sessionId} vs ${recordingSessionId.current}`,
+          "\n- Timestamp:",
+          new Date().toISOString()
         );
         return;
       }
@@ -54,17 +138,39 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         0
       );
 
+      // Log timing details for each chunk
+      console.log(
+        `⏱ Chunk timing details:`,
+        `\n- Chunk time: ${new Date(chunkTime).toISOString()}`,
+        `\n- Recording start: ${new Date(
+          recordingStartTimeRef.current
+        ).toISOString()}`,
+        `\n- Recording time: ${recordingTime}ms`,
+        `\n- Expected samples: ${expectedSamples}`,
+        `\n- Current samples: ${currentSamples}`,
+        `\n- Sample rate: ${data.format.sampleRate}`
+      );
+
       // If we've already processed more samples than we should have based on time, skip this chunk
       if (currentSamples > expectedSamples) {
         console.log(
-          `Skipping excess chunk - Current samples: ${currentSamples}, Expected: ${expectedSamples}`
+          `⚠️ Skipping excess chunk #${audioChunksRef.current.length}:`,
+          "\n- Current samples:",
+          currentSamples,
+          "\n- Expected samples:",
+          expectedSamples,
+          "\n- Difference:",
+          currentSamples - expectedSamples,
+          "samples",
+          "\n- Recording time:",
+          recordingTime + "ms"
         );
         return;
       }
 
       // Add buffer validation
       if (!data.buffer || data.buffer.length === 0) {
-        console.error("Received empty audio buffer");
+        console.error("❌ Received empty audio buffer");
         return;
       }
 
@@ -82,6 +188,9 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       for (let i = 0; i < int16Array.length; i++) {
         float32Array[i] = int16Array[i] * scale;
       }
+
+      // Analyze the audio buffer before storing it
+      analyzeAudioBuffer(float32Array, audioChunksRef.current.length);
 
       // Store the converted buffer
       audioChunksRef.current.push(float32Array);
@@ -170,15 +279,38 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setIsProcessing(true);
 
     try {
+      console.log("📊 Pre-recording state check:");
+      console.log(`- Audio chunks in memory: ${audioChunksRef.current.length}`);
+      console.log(`- Previous session ID: ${recordingSessionId.current}`);
+      console.log(`- Recording state: ${isRecording}`);
+      console.log(`- Processing state: ${isProcessing}`);
+      console.log(
+        `- AudioContext state:`,
+        audioContextRef.current
+          ? {
+              state: audioContextRef.current.state,
+              sampleRate: audioContextRef.current.sampleRate,
+              baseLatency: audioContextRef.current.baseLatency,
+            }
+          : "No context"
+      );
+
       // Ensure complete cleanup of previous recording state
       await window.electron.ipcRenderer.invoke("stop-audio-capture");
       await new Promise((resolve) => setTimeout(resolve, 500)); // Add delay for cleanup
 
       // Reset all state
+      const previousChunks = audioChunksRef.current.length;
+      const previousStartTime = new Date(recordingStartTimeRef.current);
       audioChunksRef.current = [];
       recordingStartTimeRef.current = 0;
       recordingSessionId.current += 1;
       const currentSessionId = recordingSessionId.current;
+
+      console.log("🧹 Post-cleanup state:");
+      console.log(`- Cleared ${previousChunks} audio chunks`);
+      console.log(`- Previous start time: ${previousStartTime.toISOString()}`);
+      console.log(`- New session ID: ${currentSessionId}`);
 
       // Reset UI state
       setTimer(0);
@@ -188,6 +320,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
       // Create new audio context
       if (audioContextRef.current) {
+        console.log("🔄 Closing previous AudioContext");
         await audioContextRef.current.close();
       }
       audioContextRef.current = new AudioContext({
@@ -195,8 +328,15 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       });
 
       console.log(
-        `Starting new recording session ${currentSessionId}:`,
-        `\n- Audio context sample rate: ${audioContextRef.current.sampleRate}Hz`
+        "🎙 Starting new recording session",
+        currentSessionId,
+        ":",
+        "\n- Audio context sample rate:",
+        audioContextRef.current.sampleRate + "Hz",
+        "\n- Audio context state:",
+        audioContextRef.current.state,
+        "\n- Base latency:",
+        audioContextRef.current.baseLatency + "s"
       );
 
       // Start the capture
@@ -207,11 +347,23 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       });
 
       // Set recording state
+      console.log("🎙 Setting recording state...");
       recordingStartTimeRef.current = Date.now();
       setIsRecording(true);
       setIsRecordingSystem(true);
+
+      // Add small delay to ensure state is updated
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      console.log("✅ Recording started successfully:", {
+        timestamp: new Date(recordingStartTimeRef.current).toISOString(),
+        sessionId: currentSessionId,
+        sampleRate: audioContextRef.current.sampleRate,
+        recordingState: isRecording,
+        systemRecordingState: isRecordingSystem,
+      });
     } catch (error) {
-      console.error("Failed to start recording:", error);
+      console.error("❌ Failed to start recording:", error);
       await cleanupRecording();
       throw error;
     } finally {

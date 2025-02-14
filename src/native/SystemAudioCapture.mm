@@ -11,12 +11,13 @@
 @implementation AudioCapturer
 
 - (void)startCapture {
-    NSLog(@"Starting audio capture...");
+    NSLog(@"🎬 Starting audio capture... Stream state: %@", self.stream ? @"exists" : @"null");
     
     // If there's an existing stream, stop it first
     if (self.stream) {
-        NSLog(@"Stopping existing stream before starting new capture");
+        NSLog(@"⚠️ Stopping existing stream before starting new capture");
         [self stopCaptureWithCompletion:^{
+            NSLog(@"✅ Previous stream cleanup complete, initializing new capture");
             [self initializeNewCapture];
         }];
         return;
@@ -26,16 +27,17 @@
 }
 
 - (void)initializeNewCapture {
+    NSLog(@"🔄 Initializing new capture...");
     [SCShareableContent getShareableContentWithCompletionHandler:^(
         SCShareableContent *content, NSError *error
     ) {
         if (error) {
-            NSLog(@"Error getting shareable content: %@", error);
+            NSLog(@"❌ Error getting shareable content: %@", error);
             return;
         }
         
         if (content.displays.count == 0) {
-            NSLog(@"No displays found");
+            NSLog(@"❌ No displays found");
             return;
         }
 
@@ -48,8 +50,9 @@
             config.capturesAudio = YES;
             config.excludesCurrentProcessAudio = YES;
             config.channelCount = 1;    // Mono audio
-            // Let system handle sample rate
-            NSLog(@"Configured audio capture with system default sample rate and mono audio");
+            NSLog(@"📊 Stream configuration: channels=%d, excludesCurrentProcess=%d", 
+                (int)config.channelCount, 
+                config.excludesCurrentProcessAudio);
         }
 
         self.stream = [[SCStream alloc] 
@@ -65,29 +68,30 @@
                 error:&streamError];
                 
             if (streamError) {
-                NSLog(@"Error adding stream output: %@", streamError);
+                NSLog(@"❌ Error adding stream output: %@", streamError);
                 return;
             }
-            NSLog(@"Stream output added successfully");
+            NSLog(@"✅ Stream output added successfully");
         }
         
         [self.stream startCaptureWithCompletionHandler:^(NSError *error) {
             if (error) {
-                NSLog(@"Capture error: %@", error);
+                NSLog(@"❌ Capture error: %@", error);
                 return;
             }
-            NSLog(@"Audio capture started successfully");
+            NSLog(@"✅ Audio capture started successfully");
         }];
     }];
 }
 
 - (void)stopCaptureWithCompletion:(void (^)(void))completion {
-    NSLog(@"Stopping audio capture...");
+    NSLog(@"🛑 Stopping audio capture... Stream state: %@", self.stream ? @"exists" : @"null");
     
     // Ensure we're on the main queue for thread safety
     dispatch_async(dispatch_get_main_queue(), ^{
         // Immediately invalidate any pending data
         if (self.jsCallback) {
+            NSLog(@"🧹 Cleaning up JS callback");
             self.jsCallback.Abort();
             self.jsCallback.Release();
             self.jsCallback = nullptr;
@@ -97,26 +101,29 @@
             // Remove stream output before stopping
             if (@available(macOS 13.0, *)) {
                 NSError *removeError = nil;
+                NSLog(@"🔄 Removing stream output");
                 [self.stream removeStreamOutput:self type:SCStreamOutputTypeAudio error:&removeError];
                 if (removeError) {
-                    NSLog(@"Error removing stream output: %@", removeError);
+                    NSLog(@"⚠️ Error removing stream output: %@", removeError);
                 }
             }
             
             // Stop the capture stream
             [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
                 if (error) {
-                    NSLog(@"Error stopping capture: %@", error);
+                    NSLog(@"❌ Error stopping capture: %@", error);
                 } else {
-                    NSLog(@"Audio capture stopped successfully");
+                    NSLog(@"✅ Audio capture stopped successfully");
                 }
                 
                 // Cleanup stream
+                NSLog(@"🧹 Cleaning up stream instance");
                 self.stream = nil;
                 
                 // Call completion handler on main queue
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (completion) {
+                        NSLog(@"✅ Capture cleanup completed");
                         completion();
                     }
                 });
@@ -124,6 +131,7 @@
         } else {
             // If no stream exists, just call completion
             if (completion) {
+                NSLog(@"ℹ️ No stream to cleanup, completing");
                 completion();
             }
         }
@@ -144,6 +152,23 @@
         NSLog(@"Failed to get audio format description");
         return;
     }
+
+    // Add detailed buffer timing analysis
+    CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+    CMTime duration = CMSampleBufferGetDuration(sampleBuffer);
+    
+    NSLog(@"🎯 Buffer timing analysis:");
+    NSLog(@"- Presentation time: %.6fs", CMTimeGetSeconds(presentationTime));
+    NSLog(@"- Duration: %.6fs", CMTimeGetSeconds(duration));
+    NSLog(@"- System time: %.6f", CACurrentMediaTime());
+    
+    // Add buffer state analysis
+    size_t bufferSize = CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer));
+    NSLog(@"📊 Buffer state analysis:");
+    NSLog(@"- Buffer size: %zu bytes", bufferSize);
+    NSLog(@"- Frames: %zu", bufferSize / asbd->mBytesPerFrame);
+    NSLog(@"- Sample rate: %.1f Hz", asbd->mSampleRate);
+    NSLog(@"- Format flags: 0x%x", (unsigned int)asbd->mFormatFlags);
 
     // Calculate sample count correctly based on bytes per frame
     size_t bytesPerFrame = asbd->mBytesPerFrame;
