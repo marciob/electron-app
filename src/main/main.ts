@@ -16,6 +16,7 @@ interface AudioCaptureOptions {
 }
 
 let audioCapture: any = null;
+let isCleaningUp = false; // Add cleanup lock
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -95,35 +96,35 @@ function createWindow() {
   });
 
   const stopExistingCapture = async () => {
-    if (audioCapture) {
-      console.log("Stopping previous capture instance");
-      try {
-        // Add timeout to prevent hanging
-        await Promise.race([
-          audioCapture.stopCapture(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Stop capture timeout")), 1000)
-          ),
-        ]);
+    if (!audioCapture || isCleaningUp) {
+      return; // Skip if already cleaned up or cleaning up
+    }
 
-        // Add cooldown to ensure native resources release
-        await new Promise((resolve) => setTimeout(resolve, 100));
+    isCleaningUp = true;
+    console.log("Stopping previous capture instance");
 
-        // Force cleanup of old instance
-        const oldCapture = audioCapture;
-        audioCapture = null;
+    try {
+      // Add timeout to prevent hanging
+      await Promise.race([
+        audioCapture.stopCapture(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Stop capture timeout")), 1000)
+        ),
+      ]);
 
-        // Cleanup callback reference
-        if (oldCapture.jsCallback) {
-          oldCapture.jsCallback = null;
-        }
+      // Add cooldown to ensure native resources release
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
-        console.log("Capture instance cleanup completed");
-      } catch (error) {
-        console.error("Error stopping capture:", error);
-        // Ensure cleanup even on error
-        audioCapture = null;
-      }
+      // Force cleanup of old instance
+      audioCapture = null;
+
+      console.log("Capture instance cleanup completed");
+    } catch (error) {
+      console.error("Error stopping capture:", error);
+      // Ensure cleanup even on error
+      audioCapture = null;
+    } finally {
+      isCleaningUp = false;
     }
   };
 
@@ -134,10 +135,7 @@ function createWindow() {
         console.log("Starting new audio capture with options:", options);
         await requestPermissions();
 
-        // Stop any existing capture first
-        await stopExistingCapture();
-
-        // Initialize new capture instance
+        // Initialize new capture instance without stopping (we already stopped)
         initAudioCapture();
 
         // Start capture with the callback

@@ -10,6 +10,7 @@ const path = require("path");
 const isDev = require("electron-is-dev");
 const { SystemAudioCapture } = require("bindings")("systemAudio");
 let audioCapture = null;
+let isCleaningUp = false;
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 800,
@@ -73,26 +74,26 @@ function createWindow() {
     }
   });
   const stopExistingCapture = async () => {
-    if (audioCapture) {
-      console.log("Stopping previous capture instance");
-      try {
-        await Promise.race([
-          audioCapture.stopCapture(),
-          new Promise(
-            (_, reject) => setTimeout(() => reject(new Error("Stop capture timeout")), 1e3)
-          )
-        ]);
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const oldCapture = audioCapture;
-        audioCapture = null;
-        if (oldCapture.jsCallback) {
-          oldCapture.jsCallback = null;
-        }
-        console.log("Capture instance cleanup completed");
-      } catch (error) {
-        console.error("Error stopping capture:", error);
-        audioCapture = null;
-      }
+    if (!audioCapture || isCleaningUp) {
+      return;
+    }
+    isCleaningUp = true;
+    console.log("Stopping previous capture instance");
+    try {
+      await Promise.race([
+        audioCapture.stopCapture(),
+        new Promise(
+          (_, reject) => setTimeout(() => reject(new Error("Stop capture timeout")), 1e3)
+        )
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      audioCapture = null;
+      console.log("Capture instance cleanup completed");
+    } catch (error) {
+      console.error("Error stopping capture:", error);
+      audioCapture = null;
+    } finally {
+      isCleaningUp = false;
     }
   };
   ipcMain.handle(
@@ -101,7 +102,6 @@ function createWindow() {
       try {
         console.log("Starting new audio capture with options:", options);
         await requestPermissions();
-        await stopExistingCapture();
         initAudioCapture();
         audioCapture.startCapture((buffer, format) => {
           if (!mainWindow.isDestroyed()) {

@@ -123,11 +123,12 @@
                     NSLog(@"✅ Audio capture stopped successfully");
                 }
                 
-                // Cleanup stream
-                NSLog(@"🧹 Cleaning up stream instance");
-                
-                // Call completion handler on main queue
-                dispatch_async(dispatch_get_main_queue(), ^{
+                // Add a small delay to ensure buffers are flushed
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    // Cleanup stream
+                    NSLog(@"🧹 Cleaning up stream instance");
+                    
+                    // Call completion handler on main queue
                     if (completion) {
                         NSLog(@"✅ Capture cleanup completed");
                         completion();
