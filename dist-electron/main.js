@@ -1,14 +1,21 @@
 "use strict";
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const isDev = require("electron-is-dev");
+const fs = require("fs");
+const recordingsDir = path.join(app.getPath("userData"), "recordings");
+if (!fs.existsSync(recordingsDir)) {
+  fs.mkdirSync(recordingsDir, { recursive: true });
+}
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
     webPreferences: {
       nodeIntegration: true,
-      contextIsolation: false
+      contextIsolation: false,
+      webSecurity: false
+      // Allow loading local files
     }
   });
   if (isDev) {
@@ -17,6 +24,12 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, "../../dist/index.html"));
   }
 }
+ipcMain.handle("save-audio-file", async (event, buffer) => {
+  const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  const filePath = path.join(recordingsDir, `recording-${timestamp}.webm`);
+  fs.writeFileSync(filePath, Buffer.from(buffer));
+  return filePath;
+});
 app.whenReady().then(() => {
   createWindow();
   app.on("activate", () => {
