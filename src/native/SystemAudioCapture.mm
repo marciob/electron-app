@@ -87,29 +87,36 @@
 - (void)stopCaptureWithCompletion:(void (^)(void))completion {
     NSLog(@"🛑 Stopping audio capture... Stream state: %@", self.stream ? @"exists" : @"null");
     
+    // Create local copies of properties we need to clean up
+    SCStream *streamToStop = self.stream;
+    Napi::ThreadSafeFunction callbackToClean = self.jsCallback;
+    
+    // Clear properties immediately to prevent new usage
+    self.stream = nil;
+    self.jsCallback = nullptr;
+    
     // Ensure we're on the main queue for thread safety
     dispatch_async(dispatch_get_main_queue(), ^{
         // Immediately invalidate any pending data
-        if (self.jsCallback) {
+        if (callbackToClean) {
             NSLog(@"🧹 Cleaning up JS callback");
-            self.jsCallback.Abort();
-            self.jsCallback.Release();
-            self.jsCallback = nullptr;
+            callbackToClean.Abort();
+            callbackToClean.Release();
         }
         
-        if (self.stream) {
+        if (streamToStop) {
             // Remove stream output before stopping
             if (@available(macOS 13.0, *)) {
                 NSError *removeError = nil;
                 NSLog(@"🔄 Removing stream output");
-                [self.stream removeStreamOutput:self type:SCStreamOutputTypeAudio error:&removeError];
+                [streamToStop removeStreamOutput:self type:SCStreamOutputTypeAudio error:&removeError];
                 if (removeError) {
                     NSLog(@"⚠️ Error removing stream output: %@", removeError);
                 }
             }
             
             // Stop the capture stream
-            [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
+            [streamToStop stopCaptureWithCompletionHandler:^(NSError *error) {
                 if (error) {
                     NSLog(@"❌ Error stopping capture: %@", error);
                 } else {
@@ -118,7 +125,6 @@
                 
                 // Cleanup stream
                 NSLog(@"🧹 Cleaning up stream instance");
-                self.stream = nil;
                 
                 // Call completion handler on main queue
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -370,9 +376,22 @@ private:
             // Store the deferred object in a shared pointer to keep it alive
             auto deferredPtr = std::make_shared<Napi::Promise::Deferred>(std::move(deferred));
             
+            // Create a ThreadSafeFunction for the completion callback
+            auto tsfn = Napi::ThreadSafeFunction::New(
+                env,
+                Napi::Function::New(env, [](const Napi::CallbackInfo& info) {}),
+                "Cleanup Callback",
+                0,
+                1,
+                [deferredPtr](Napi::Env env) {
+                    // This will be called when the thread-safe function is finalized
+                    deferredPtr->Resolve(env.Undefined());
+                }
+            );
+            
             [capturer stopCaptureWithCompletion:^{
-                // Resolve the promise on the JS thread
-                deferredPtr->Resolve(deferredPtr->Env().Undefined());
+                // Release the thread-safe function, which will trigger the finalizer
+                tsfn.Release();
             }];
             
             return deferredPtr->Promise();
