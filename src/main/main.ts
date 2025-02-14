@@ -138,7 +138,7 @@ function createWindow() {
         // Initialize new capture instance without stopping (we already stopped)
         initAudioCapture();
 
-        // Start capture with the callback
+        // Start capture with the callback and options
         audioCapture.startCapture((buffer: Buffer, format: any) => {
           if (!mainWindow.isDestroyed()) {
             mainWindow.webContents.send("audio-data", {
@@ -147,7 +147,7 @@ function createWindow() {
               sessionId: options.sessionId,
             });
           }
-        });
+        }, options);
 
         console.log("Audio capture started successfully");
       } catch (error) {

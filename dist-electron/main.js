@@ -111,7 +111,7 @@ function createWindow() {
               sessionId: options.sessionId
             });
           }
-        });
+        }, options);
         console.log("Audio capture started successfully");
       } catch (error) {
         console.error("Error starting audio capture:", error);

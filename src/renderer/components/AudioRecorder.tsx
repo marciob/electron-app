@@ -194,7 +194,14 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
         // Create new audio context
         if (audioContextRef.current) {
-          await audioContextRef.current.close();
+          try {
+            const state = audioContextRef.current.state;
+            if (state !== "closed") {
+              await audioContextRef.current.close();
+            }
+          } catch (error) {
+            console.warn("Warning: Error while closing audio context:", error);
+          }
         }
         audioContextRef.current = new AudioContext({
           sampleRate: 48000,
@@ -218,16 +225,15 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         // Add new event listener
         window.electron.ipcRenderer.on("audio-data", eventHandler);
 
-        // Start the capture
-        console.log("🎬 Starting audio capture...");
+        // Start the capture with both system and mic
+        console.log("🎬 Starting audio capture (system + mic)...");
         await window.electron.ipcRenderer.invoke("start-audio-capture", {
           sessionId: currentSessionId,
           system: true,
-          mic: false,
+          mic: true,
         });
 
         if (!cleanup) {
-          // Don't set recordingStartTimeRef here anymore, we'll set it when we detect non-silent audio
           setAudioFormat({ sampleRate: 48000, channels: 1 });
 
           console.log("✅ Recording started successfully:", {
@@ -345,6 +351,13 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       setIsRecording(true);
       setIsRecordingSystem(true);
       setTimer(0);
+
+      // Start capture with both system and mic
+      await window.electron.ipcRenderer.invoke("start-audio-capture", {
+        sessionId: recordingSessionId.current,
+        system: true,
+        mic: true,
+      });
     } catch (error) {
       console.error("Failed to start recording:", error);
       setIsRecording(false);
@@ -547,31 +560,33 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   return (
     <div className="max-w-2xl mx-auto p-6">
       <div className="flex flex-col items-center mb-8">
-        <div className="flex items-center gap-4 mb-4">
-          <div className="relative">
-            <button
-              className={`w-12 h-12 rounded-full flex items-center justify-center ${
-                isRecordingSystem
-                  ? "bg-red-500"
-                  : "bg-gray-200 hover:bg-gray-300"
-              } transition-colors duration-200`}
-              onClick={isRecording ? stopRecording : startRecording}
-            >
-              <IoMdVolumeHigh
-                className={`text-xl ${
-                  isRecordingSystem ? "text-white" : "text-gray-700"
-                }`}
-              />
-            </button>
-            <span className="mt-2 block text-center text-sm text-gray-600">
-              System Audio
-            </span>
+        <button
+          className={`relative flex items-center justify-center gap-2 px-6 py-3 text-lg font-medium rounded-lg transition-all duration-200 ${
+            isRecording
+              ? "bg-red-500 text-white hover:bg-red-600"
+              : "bg-blue-500 text-white hover:bg-blue-600"
+          } ${isProcessing ? "opacity-50 cursor-not-allowed" : ""}`}
+          onClick={isRecording ? stopRecording : startRecording}
+          disabled={isProcessing}
+        >
+          <div className="flex items-center gap-2">
+            {isRecording ? (
+              <>
+                <div className="w-3 h-3 rounded-full bg-white animate-pulse" />
+                Stop Recording
+              </>
+            ) : (
+              <>
+                <IoMdVolumeHigh className="text-xl" />
+                <FaMicrophone className="text-xl" />
+                <span>Record System + Mic</span>
+              </>
+            )}
           </div>
-        </div>
-
-        {isRecordingSystem && (
-          <div className="text-red-500 font-mono text-xl animate-pulse">
-            Recording... {formatTime(timer)}
+        </button>
+        {isRecording && (
+          <div className="mt-4 text-lg font-mono text-red-500">
+            {formatTime(timer)}
           </div>
         )}
       </div>

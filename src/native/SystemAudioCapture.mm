@@ -2,32 +2,155 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreMedia/CoreMedia.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <AVFoundation/AVFoundation.h>
 
-@interface AudioCapturer : NSObject <SCStreamDelegate, SCStreamOutput>
-@property (strong) SCStream *stream;
+@interface AudioMixer : NSObject {
+@public
+    AudioStreamBasicDescription _format;
+    AudioUnit _mixerUnit;
+}
+- (instancetype)initWithFormat:(AudioStreamBasicDescription)format;
+- (void)processSystemAudio:(const float*)systemBuffer mic:(const float*)micBuffer frames:(UInt32)frames output:(float*)outputBuffer;
+- (void)cleanup;
+@end
+
+@implementation AudioMixer
+
+- (instancetype)initWithFormat:(AudioStreamBasicDescription)format {
+    if (self = [super init]) {
+        _format = format;
+        [self setupMixer];
+    }
+    return self;
+}
+
+- (void)setupMixer {
+    AudioComponentDescription desc = {
+        .componentType = kAudioUnitType_Mixer,
+        .componentSubType = kAudioUnitSubType_MultiChannelMixer,
+        .componentManufacturer = kAudioUnitManufacturer_Apple,
+        .componentFlags = 0,
+        .componentFlagsMask = 0
+    };
+    
+    AudioComponent component = AudioComponentFindNext(NULL, &desc);
+    AudioComponentInstanceNew(component, &_mixerUnit);
+    
+    AudioUnitInitialize(_mixerUnit);
+    
+    // Set mixer properties
+    UInt32 busCount = 2;  // System audio and mic
+    AudioUnitSetProperty(_mixerUnit,
+                        kAudioUnitProperty_ElementCount,
+                        kAudioUnitScope_Input,
+                        0,
+                        &busCount,
+                        sizeof(busCount));
+    
+    // Set volumes for both inputs
+    AudioUnitSetParameter(_mixerUnit,
+                         kMultiChannelMixerParam_Volume,
+                         kAudioUnitScope_Input,
+                         0,  // System audio bus
+                         0.7,  // 70% volume for system audio
+                         0);
+    
+    AudioUnitSetParameter(_mixerUnit,
+                         kMultiChannelMixerParam_Volume,
+                         kAudioUnitScope_Input,
+                         1,  // Mic bus
+                         1.0,  // 100% volume for mic
+                         0);
+}
+
+- (void)processSystemAudio:(const float*)systemBuffer mic:(const float*)micBuffer frames:(UInt32)frames output:(float*)outputBuffer {
+    // Mix system audio and mic input with proper gain control
+    for (UInt32 i = 0; i < frames; i++) {
+        float systemSample = systemBuffer ? systemBuffer[i] : 0.0f;
+        float micSample = micBuffer ? micBuffer[i] : 0.0f;
+        
+        // Apply soft clipping to prevent distortion
+        float mixed = systemSample + micSample;
+        if (mixed > 1.0f) {
+            mixed = 1.0f - expf(-mixed);
+        } else if (mixed < -1.0f) {
+            mixed = -1.0f + expf(mixed);
+        }
+        
+        outputBuffer[i] = mixed;
+    }
+}
+
+- (void)cleanup {
+    if (_mixerUnit) {
+        AudioUnitUninitialize(_mixerUnit);
+        AudioComponentInstanceDispose(_mixerUnit);
+        _mixerUnit = NULL;
+    }
+}
+
+@end
+
+@interface AudioCapturer : NSObject <SCStreamDelegate, SCStreamOutput, AVCaptureAudioDataOutputSampleBufferDelegate>
+@property (strong, nonatomic) SCStream *systemStream;
+@property (strong, nonatomic) AVCaptureSession *micSession;
+@property (strong, nonatomic) AudioMixer *audioMixer;
 @property (nonatomic) Napi::ThreadSafeFunction jsCallback;
+@property (strong, nonatomic) dispatch_queue_t audioQueue;
+@property (strong, nonatomic) NSMutableData *systemAudioBuffer;
+@property (strong, nonatomic) NSMutableData *micAudioBuffer;
+@property (atomic) BOOL isCapturing;
+@property (nonatomic) BOOL shouldCaptureMic;
+@property (nonatomic) BOOL shouldCaptureSystem;
 @end
 
 @implementation AudioCapturer
 
-- (void)startCapture {
-    NSLog(@"🎬 Starting audio capture... Stream state: %@", self.stream ? @"exists" : @"null");
+- (instancetype)init {
+    if (self = [super init]) {
+        _audioQueue = dispatch_queue_create("com.audio.processing", DISPATCH_QUEUE_SERIAL);
+        _systemAudioBuffer = [NSMutableData new];
+        _micAudioBuffer = [NSMutableData new];
+        _isCapturing = NO;
+    }
+    return self;
+}
+
+- (void)startCaptureWithOptions:(NSDictionary*)options {
+    _shouldCaptureMic = [options[@"mic"] boolValue];
+    _shouldCaptureSystem = [options[@"system"] boolValue];
     
-    // If there's an existing stream, stop it first
-    if (self.stream) {
-        NSLog(@"⚠️ Stopping existing stream before starting new capture");
-        [self stopCaptureWithCompletion:^{
-            NSLog(@"✅ Previous stream cleanup complete, initializing new capture");
-            [self initializeNewCapture];
-        }];
+    if (!_shouldCaptureMic && !_shouldCaptureSystem) {
+        NSLog(@"❌ No capture sources specified");
         return;
     }
     
-    [self initializeNewCapture];
+    _isCapturing = YES;
+    
+    // Initialize audio mixer with desired format
+    AudioStreamBasicDescription format = {
+        .mSampleRate = 48000.0,
+        .mFormatID = kAudioFormatLinearPCM,
+        .mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+        .mBytesPerPacket = 4,
+        .mFramesPerPacket = 1,
+        .mBytesPerFrame = 4,
+        .mChannelsPerFrame = 1,
+        .mBitsPerChannel = 32
+    };
+    
+    _audioMixer = [[AudioMixer alloc] initWithFormat:format];
+    
+    if (_shouldCaptureSystem) {
+        [self initializeSystemCapture];
+    }
+    
+    if (_shouldCaptureMic) {
+        [self initializeMicCapture];
+    }
 }
 
-- (void)initializeNewCapture {
-    NSLog(@"🔄 Initializing new capture...");
+- (void)initializeSystemCapture {
     [SCShareableContent getShareableContentWithCompletionHandler:^(
         SCShareableContent *content, NSError *error
     ) {
@@ -49,273 +172,207 @@
         if (@available(macOS 13.0, *)) {
             config.capturesAudio = YES;
             config.excludesCurrentProcessAudio = YES;
-            config.channelCount = 1;    // Mono audio
-            NSLog(@"📊 Stream configuration: channels=%d, excludesCurrentProcess=%d", 
-                (int)config.channelCount, 
-                config.excludesCurrentProcessAudio);
+            config.channelCount = 1;
+            NSLog(@"📊 System stream configuration: channels=%d", (int)config.channelCount);
         }
 
-        self.stream = [[SCStream alloc] 
+        self.systemStream = [[SCStream alloc] 
             initWithFilter:filter 
             configuration:config 
             delegate:self];
 
         if (@available(macOS 13.0, *)) {
             NSError *streamError = nil;
-            [self.stream addStreamOutput:self 
+            [self.systemStream addStreamOutput:self 
                 type:SCStreamOutputTypeAudio 
-                sampleHandlerQueue:dispatch_get_main_queue()
+                sampleHandlerQueue:self.audioQueue
                 error:&streamError];
                 
             if (streamError) {
-                NSLog(@"❌ Error adding stream output: %@", streamError);
+                NSLog(@"❌ Error adding system stream output: %@", streamError);
                 return;
             }
-            NSLog(@"✅ Stream output added successfully");
+            NSLog(@"✅ System stream output added successfully");
         }
         
-        [self.stream startCaptureWithCompletionHandler:^(NSError *error) {
+        [self.systemStream startCaptureWithCompletionHandler:^(NSError *error) {
             if (error) {
-                NSLog(@"❌ Capture error: %@", error);
+                NSLog(@"❌ System capture error: %@", error);
                 return;
             }
-            NSLog(@"✅ Audio capture started successfully");
+            NSLog(@"✅ System audio capture started successfully");
         }];
     }];
 }
 
-- (void)stopCaptureWithCompletion:(void (^)(void))completion {
-    NSLog(@"🛑 Stopping audio capture... Stream state: %@", self.stream ? @"exists" : @"null");
+- (void)initializeMicCapture {
+    self.micSession = [[AVCaptureSession alloc] init];
     
-    // Create local copies of properties we need to clean up
-    SCStream *streamToStop = self.stream;
-    Napi::ThreadSafeFunction callbackToClean = self.jsCallback;
+    // Configure mic input
+    AVCaptureDevice *microphone = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+    NSError *error = nil;
+    AVCaptureDeviceInput *micInput = [AVCaptureDeviceInput deviceInputWithDevice:microphone error:&error];
     
-    // Clear properties immediately to prevent new usage
-    self.stream = nil;
-    self.jsCallback = nullptr;
+    if (error) {
+        NSLog(@"❌ Error creating mic input: %@", error);
+        return;
+    }
     
-    // Ensure we're on the main queue for thread safety
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // Immediately invalidate any pending data
-        if (callbackToClean) {
-            NSLog(@"🧹 Cleaning up JS callback");
-            callbackToClean.Abort();
-            callbackToClean.Release();
-        }
-        
-        if (streamToStop) {
-            // Remove stream output before stopping
-            if (@available(macOS 13.0, *)) {
-                NSError *removeError = nil;
-                NSLog(@"🔄 Removing stream output");
-                [streamToStop removeStreamOutput:self type:SCStreamOutputTypeAudio error:&removeError];
-                if (removeError) {
-                    NSLog(@"⚠️ Error removing stream output: %@", removeError);
-                }
-            }
-            
-            // Stop the capture stream
-            [streamToStop stopCaptureWithCompletionHandler:^(NSError *error) {
-                if (error) {
-                    NSLog(@"❌ Error stopping capture: %@", error);
-                } else {
-                    NSLog(@"✅ Audio capture stopped successfully");
-                }
-                
-                // Add a small delay to ensure buffers are flushed
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    // Cleanup stream
-                    NSLog(@"🧹 Cleaning up stream instance");
-                    
-                    // Call completion handler on main queue
-                    if (completion) {
-                        NSLog(@"✅ Capture cleanup completed");
-                        completion();
-                    }
-                });
-            }];
-        } else {
-            // If no stream exists, just call completion
-            if (completion) {
-                NSLog(@"ℹ️ No stream to cleanup, completing");
-                completion();
-            }
-        }
-    });
+    if ([self.micSession canAddInput:micInput]) {
+        [self.micSession addInput:micInput];
+    }
+    
+    // Configure audio output
+    AVCaptureAudioDataOutput *micOutput = [[AVCaptureAudioDataOutput alloc] init];
+    [micOutput setSampleBufferDelegate:self queue:self.audioQueue];
+    
+    if ([self.micSession canAddOutput:micOutput]) {
+        [self.micSession addOutput:micOutput];
+    }
+    
+    // Start the session
+    [self.micSession startRunning];
+    NSLog(@"✅ Microphone capture started successfully");
+}
+
+- (void)captureOutput:(AVCaptureOutput *)output 
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer 
+       fromConnection:(AVCaptureConnection *)connection {
+    if (!self.isCapturing) return;
+    
+    // Process microphone audio
+    CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
+    size_t length = CMBlockBufferGetDataLength(blockBuffer);
+    float *micBuffer = (float*)malloc(length);
+    
+    CMBlockBufferCopyDataBytes(blockBuffer, 0, length, micBuffer);
+    
+    @synchronized (self.micAudioBuffer) {
+        [self.micAudioBuffer appendBytes:micBuffer length:length];
+    }
+    
+    free(micBuffer);
+    
+    [self processCombinedAudioIfReady];
 }
 
 - (void)stream:(SCStream *)stream 
-    didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer 
-    ofType:(SCStreamOutputType)type API_AVAILABLE(macos(13.0)) {
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer 
+         ofType:(SCStreamOutputType)type {
+    if (!self.isCapturing) return;
     
-    if (type != SCStreamOutputTypeAudio || !self.jsCallback) return;
-
-    // Get audio format details
-    CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
-    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc);
+    if (@available(macOS 13.0, *)) {
+        if (type != SCStreamOutputTypeAudio) return;
+    } else {
+        return; // Skip audio processing on older macOS versions
+    }
     
-    if (!asbd) {
-        NSLog(@"Failed to get audio format description");
-        return;
-    }
-
-    // Add detailed buffer timing analysis
-    CMTime presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-    CMTime duration = CMSampleBufferGetDuration(sampleBuffer);
-    
-    NSLog(@"🎯 Buffer timing analysis:");
-    NSLog(@"- Presentation time: %.6fs", CMTimeGetSeconds(presentationTime));
-    NSLog(@"- Duration: %.6fs", CMTimeGetSeconds(duration));
-    NSLog(@"- System time: %.6f", CACurrentMediaTime());
-    
-    // Add buffer state analysis
-    size_t bufferSize = CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer));
-    NSLog(@"📊 Buffer state analysis:");
-    NSLog(@"- Buffer size: %zu bytes", bufferSize);
-    NSLog(@"- Frames: %zu", bufferSize / asbd->mBytesPerFrame);
-    NSLog(@"- Sample rate: %.1f Hz", asbd->mSampleRate);
-    NSLog(@"- Format flags: 0x%x", (unsigned int)asbd->mFormatFlags);
-
-    // Calculate sample count correctly based on bytes per frame
-    size_t bytesPerFrame = asbd->mBytesPerFrame;
-    size_t sampleCount = CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer)) / bytesPerFrame;
-
-    // Add validation
-    if (CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer)) % bytesPerFrame != 0) {
-        NSLog(@"⚠️ Invalid audio chunk: %zu bytes with %zu bytes/frame", CMBlockBufferGetDataLength(CMSampleBufferGetDataBuffer(sampleBuffer)), bytesPerFrame);
-        return;
-    }
-
-    // Validate audio format
-    if (asbd->mSampleRate != 48000.0) {
-        NSLog(@"⚠️ Unexpected sample rate: %.1f Hz (expected 48000 Hz)", asbd->mSampleRate);
-    }
-    if (asbd->mChannelsPerFrame != 1) {
-        NSLog(@"⚠️ Unexpected channel count: %d (expected 1)", (int)asbd->mChannelsPerFrame);
-    }
-    if (asbd->mBitsPerChannel != 16 && asbd->mBitsPerChannel != 32) {
-        NSLog(@"⚠️ Unexpected bits per channel: %d (expected 16 or 32)", (int)asbd->mBitsPerChannel);
-    }
-    if (!(asbd->mFormatFlags & kAudioFormatFlagIsFloat) && asbd->mBitsPerChannel == 32) {
-        NSLog(@"⚠️ Unexpected format: 32-bit non-float data");
-    }
-
-    // Log detailed format details with validation markers
-    NSLog(@"Audio format details:%@%@%@", 
-        asbd->mSampleRate != 48000.0 ? @" ⚠️" : @"",
-        asbd->mChannelsPerFrame != 1 ? @" ⚠️" : @"",
-        asbd->mBitsPerChannel != 16 && asbd->mBitsPerChannel != 32 ? @" ⚠️" : @"");
-    NSLog(@"- Sample rate: %.1f Hz", asbd->mSampleRate);
-    NSLog(@"- Channels: %d", (int)asbd->mChannelsPerFrame);
-    NSLog(@"- Bits per channel: %d", (int)asbd->mBitsPerChannel);
-    NSLog(@"- Format: %@", (asbd->mFormatFlags & kAudioFormatFlagIsFloat) ? @"float" : @"integer");
-    NSLog(@"- Bytes per frame: %d", (int)asbd->mBytesPerFrame);
-    NSLog(@"- Frames per packet: %d", (int)asbd->mFramesPerPacket);
-
+    // Process system audio
     CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
     size_t length = CMBlockBufferGetDataLength(blockBuffer);
+    float *systemBuffer = (float*)malloc(length);
     
-    void *buffer = malloc(length);
-    if (!buffer) {
-        NSLog(@"⚠️ Failed to allocate buffer for audio data");
-        return;
+    CMBlockBufferCopyDataBytes(blockBuffer, 0, length, systemBuffer);
+    
+    @synchronized (self.systemAudioBuffer) {
+        [self.systemAudioBuffer appendBytes:systemBuffer length:length];
     }
     
-    CMBlockBufferCopyDataBytes(blockBuffer, 0, length, buffer);
+    free(systemBuffer);
     
-    // Allocate buffer for converted samples
-    int16_t *pcmBuffer = (int16_t *)malloc(sampleCount * sizeof(int16_t));
+    [self processCombinedAudioIfReady];
+}
+
+- (void)processCombinedAudioIfReady {
+    static const size_t BUFFER_SIZE = 960 * sizeof(float); // 20ms at 48kHz
     
-    if (asbd->mFormatID == kAudioFormatLinearPCM) {
-        if (asbd->mBitsPerChannel == 32 && (asbd->mFormatFlags & kAudioFormatFlagIsFloat)) {
-            float *floatBuffer = (float *)buffer;
-            
-            // Log input levels
-            float maxInput = 0.0f;
-            float minInput = 0.0f;
-            for (size_t i = 0; i < sampleCount; i++) {
-                if (floatBuffer[i] > maxInput) maxInput = floatBuffer[i];
-                if (floatBuffer[i] < minInput) minInput = floatBuffer[i];
+    @synchronized (self.systemAudioBuffer) {
+        @synchronized (self.micAudioBuffer) {
+            if (self.systemAudioBuffer.length >= BUFFER_SIZE && 
+                (!self.shouldCaptureMic || self.micAudioBuffer.length >= BUFFER_SIZE)) {
+                
+                float *outputBuffer = (float*)malloc(BUFFER_SIZE);
+                float *systemData = (float*)self.systemAudioBuffer.bytes;
+                float *micData = self.shouldCaptureMic ? (float*)self.micAudioBuffer.bytes : NULL;
+                
+                [self.audioMixer processSystemAudio:systemData 
+                                              mic:micData 
+                                          frames:960 
+                                         output:outputBuffer];
+                
+                // Convert to 16-bit PCM
+                int16_t *pcmBuffer = (int16_t*)malloc(960 * sizeof(int16_t));
+                for (size_t i = 0; i < 960; i++) {
+                    float sample = outputBuffer[i];
+                    sample = fmax(-1.0f, fmin(1.0f, sample));
+                    pcmBuffer[i] = (int16_t)(sample * 32767.0f);
+                }
+                
+                // Send to JavaScript
+                self.jsCallback.BlockingCall([pcmBuffer](Napi::Env env, Napi::Function jsCallback) {
+                    auto audioBuffer = Napi::Buffer<int16_t>::Copy(env, pcmBuffer, 960);
+                    auto formatObj = Napi::Object::New(env);
+                    formatObj.Set("sampleRate", Napi::Number::New(env, 48000));
+                    formatObj.Set("channels", Napi::Number::New(env, 1));
+                    formatObj.Set("bitsPerChannel", Napi::Number::New(env, 16));
+                    jsCallback.Call({audioBuffer, formatObj});
+                    free(pcmBuffer);
+                });
+                
+                free(outputBuffer);
+                
+                // Remove processed data
+                [self.systemAudioBuffer replaceBytesInRange:NSMakeRange(0, BUFFER_SIZE) 
+                                                withBytes:NULL 
+                                                   length:0];
+                                                   
+                if (self.shouldCaptureMic) {
+                    [self.micAudioBuffer replaceBytesInRange:NSMakeRange(0, BUFFER_SIZE) 
+                                                 withBytes:NULL 
+                                                    length:0];
+                }
             }
-            NSLog(@"Float input levels - Max: %.6f, Min: %.6f", maxInput, minInput);
-            
-            // Convert float to 16-bit with fixed scaling and -3dB headroom
-            const float maxAllowed = 0.7071f; // -3dB
-            const float scale = 32767.0f;
-            for (size_t i = 0; i < sampleCount; i++) {
-                float sample = floatBuffer[i];
-                // Apply -3dB headroom clipping
-                if (sample > maxAllowed) sample = maxAllowed;
-                if (sample < -maxAllowed) sample = -maxAllowed;
-                pcmBuffer[i] = (int16_t)(sample * scale);
-            }
-            
-            // Log output levels
-            int16_t maxOutput = 0;
-            int16_t minOutput = 0;
-            for (size_t i = 0; i < sampleCount; i++) {
-                if (pcmBuffer[i] > maxOutput) maxOutput = pcmBuffer[i];
-                if (pcmBuffer[i] < minOutput) minOutput = pcmBuffer[i];
-            }
-            NSLog(@"PCM output levels - Max: %d, Min: %d", maxOutput, minOutput);
-            
-        } else if (asbd->mBitsPerChannel == 32 && !(asbd->mFormatFlags & kAudioFormatFlagIsFloat)) {
-            int32_t *intBuffer = (int32_t *)buffer;
-            
-            // Log input levels
-            int32_t maxInput = 0;
-            int32_t minInput = 0;
-            for (size_t i = 0; i < sampleCount; i++) {
-                if (intBuffer[i] > maxInput) maxInput = intBuffer[i];
-                if (intBuffer[i] < minInput) minInput = intBuffer[i];
-            }
-            NSLog(@"32-bit int input levels - Max: %d, Min: %d", maxInput, minInput);
-            
-            // Convert 32-bit int to 16-bit with -3dB headroom
-            const float maxAllowed = 0.7071f;
-            for (size_t i = 0; i < sampleCount; i++) {
-                float normalizedSample = (float)(intBuffer[i] >> 16) / 32768.0f;
-                if (normalizedSample > maxAllowed) normalizedSample = maxAllowed;
-                if (normalizedSample < -maxAllowed) normalizedSample = -maxAllowed;
-                pcmBuffer[i] = (int16_t)(normalizedSample * 32767.0f);
-            }
-            
-            // Log output levels
-            int16_t maxOutput = 0;
-            int16_t minOutput = 0;
-            for (size_t i = 0; i < sampleCount; i++) {
-                if (pcmBuffer[i] > maxOutput) maxOutput = pcmBuffer[i];
-                if (pcmBuffer[i] < minOutput) minOutput = pcmBuffer[i];
-            }
-            NSLog(@"PCM output levels - Max: %d, Min: %d", maxOutput, minOutput);
-            
-        } else if (asbd->mBitsPerChannel == 16) {
-            // Direct copy for 16-bit audio
-            memcpy(pcmBuffer, buffer, length);
-            
-            // Log levels for 16-bit input
-            int16_t maxLevel = 0;
-            int16_t minLevel = 0;
-            for (size_t i = 0; i < sampleCount; i++) {
-                if (pcmBuffer[i] > maxLevel) maxLevel = pcmBuffer[i];
-                if (pcmBuffer[i] < minLevel) minLevel = pcmBuffer[i];
-            }
-            NSLog(@"16-bit PCM levels - Max: %d, Min: %d", maxLevel, minLevel);
         }
     }
-    
-    free(buffer);
+}
 
-    self.jsCallback.BlockingCall([pcmBuffer, sampleCount, asbd](Napi::Env env, Napi::Function jsCallback) {
-        auto audioBuffer = Napi::Buffer<int16_t>::Copy(env, pcmBuffer, sampleCount);
-        auto formatObj = Napi::Object::New(env);
-        formatObj.Set("sampleRate", Napi::Number::New(env, asbd->mSampleRate));
-        formatObj.Set("channels", Napi::Number::New(env, asbd->mChannelsPerFrame));
-        formatObj.Set("bitsPerChannel", Napi::Number::New(env, 16)); // We're always converting to 16-bit
-        jsCallback.Call({audioBuffer, formatObj});
-        free(pcmBuffer);
-    });
+- (void)stopCapture {
+    self.isCapturing = NO;
+    
+    // Stop system audio capture
+    if (self.systemStream) {
+        [self.systemStream stopCaptureWithCompletionHandler:^(NSError *error) {
+            if (error) {
+                NSLog(@"❌ Error stopping system capture: %@", error);
+            }
+            self.systemStream = nil;
+        }];
+    }
+    
+    // Stop microphone capture
+    if (self.micSession) {
+        [self.micSession stopRunning];
+        self.micSession = nil;
+    }
+    
+    // Clear buffers
+    @synchronized (self.systemAudioBuffer) {
+        [self.systemAudioBuffer setLength:0];
+    }
+    @synchronized (self.micAudioBuffer) {
+        [self.micAudioBuffer setLength:0];
+    }
+    
+    // Clean up mixer
+    if (self.audioMixer) {
+        [self.audioMixer cleanup];
+        self.audioMixer = nil;
+    }
+    
+    // Release JS callback
+    if (self.jsCallback) {
+        self.jsCallback.Release();
+    }
 }
 
 @end
@@ -347,59 +404,35 @@ private:
     Napi::Value StartCapture(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
         
-        if (info.Length() < 1 || !info[0].IsFunction()) {
-            Napi::TypeError::New(env, "Function expected as first argument")
+        if (info.Length() < 2 || !info[0].IsFunction() || !info[1].IsObject()) {
+            Napi::TypeError::New(env, "Expected function and options object as arguments")
                 .ThrowAsJavaScriptException();
             return env.Undefined();
         }
 
         Napi::Function callback = info[0].As<Napi::Function>();
+        Napi::Object options = info[1].As<Napi::Object>();
+        
         capturer.jsCallback = Napi::ThreadSafeFunction::New(
             env, callback, "Audio Callback", 0, 1
         );
         
-        [capturer startCapture];
+        bool systemEnabled = options.Get("system").ToBoolean();
+        bool micEnabled = options.Get("mic").ToBoolean();
+        
+        NSDictionary* captureOptions = @{
+            @"system": @(systemEnabled),
+            @"mic": @(micEnabled)
+        };
+        
+        [capturer startCaptureWithOptions:captureOptions];
         return env.Undefined();
     }
 
     Napi::Value StopCapture(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
-        
-        // Create a promise to handle the async operation
-        auto deferred = Napi::Promise::Deferred::New(env);
-        
-        try {
-            if (!capturer) {
-                deferred.Resolve(env.Undefined());
-                return deferred.Promise();
-            }
-
-            // Store the deferred object in a shared pointer to keep it alive
-            auto deferredPtr = std::make_shared<Napi::Promise::Deferred>(std::move(deferred));
-            
-            // Create a ThreadSafeFunction for the completion callback
-            auto tsfn = Napi::ThreadSafeFunction::New(
-                env,
-                Napi::Function::New(env, [](const Napi::CallbackInfo& info) {}),
-                "Cleanup Callback",
-                0,
-                1,
-                [deferredPtr](Napi::Env env) {
-                    // This will be called when the thread-safe function is finalized
-                    deferredPtr->Resolve(env.Undefined());
-                }
-            );
-            
-            [capturer stopCaptureWithCompletion:^{
-                // Release the thread-safe function, which will trigger the finalizer
-                tsfn.Release();
-            }];
-            
-            return deferredPtr->Promise();
-        } catch (const std::exception& e) {
-            deferred.Reject(Napi::Error::New(env, e.what()).Value());
-            return deferred.Promise();
-        }
+        [capturer stopCapture];
+        return env.Undefined();
     }
 };
 

@@ -337,7 +337,7 @@ endif
 
 quiet_cmd_regen_makefile = ACTION Regenerating $@
 cmd_regen_makefile = cd $(srcdir); /Users/m/Desktop/dev/electron/electron-test3/node_modules/electron-rebuild/node_modules/node-gyp/gyp/gyp_main.py -fmake --ignore-environment "-Dlibrary=shared_library" "-Dvisibility=default" "-Dnode_root_dir=/Users/m/.electron-gyp/28.3.3" "-Dnode_gyp_dir=/Users/m/Desktop/dev/electron/electron-test3/node_modules/electron-rebuild/node_modules/node-gyp" "-Dnode_lib_file=/Users/m/.electron-gyp/28.3.3/<(target_arch)/node.lib" "-Dmodule_root_dir=/Users/m/Desktop/dev/electron/electron-test3" "-Dnode_engine=v8" "--depth=." "-Goutput_dir=." "--generator-output=build" -I/Users/m/Desktop/dev/electron/electron-test3/build/config.gypi -I/Users/m/Desktop/dev/electron/electron-test3/node_modules/electron-rebuild/node_modules/node-gyp/addon.gypi -I/Users/m/.electron-gyp/28.3.3/include/node/common.gypi "--toplevel-dir=." binding.gyp
-Makefile: $(srcdir)/binding.gyp $(srcdir)/node_modules/electron-rebuild/node_modules/node-gyp/addon.gypi $(srcdir)/../../../../.electron-gyp/28.3.3/include/node/common.gypi $(srcdir)/build/config.gypi $(srcdir)/node_modules/node-addon-api/node_api.gyp
+Makefile: $(srcdir)/node_modules/electron-rebuild/node_modules/node-gyp/addon.gypi $(srcdir)/build/config.gypi $(srcdir)/binding.gyp $(srcdir)/node_modules/node-addon-api/node_api.gyp $(srcdir)/../../../../.electron-gyp/28.3.3/include/node/common.gypi
 	$(call do_cmd,regen_makefile)
 
 # "all" is a concatenation of the "all" targets from all the included
