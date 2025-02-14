@@ -57,19 +57,21 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const processAudioChunk = useCallback((chunk: Float32Array) => {
-    if (!nonSilentDetectedRef.current) {
-      // Calculate RMS for silence detection
-      let rms = 0;
-      for (let i = 0; i < chunk.length; i++) {
-        rms += chunk[i] * chunk[i];
-      }
-      rms = Math.sqrt(rms / chunk.length);
+    // Calculate RMS for silence detection
+    let rms = 0;
+    for (let i = 0; i < chunk.length; i++) {
+      rms += chunk[i] * chunk[i];
+    }
+    rms = Math.sqrt(rms / chunk.length);
 
+    if (!nonSilentDetectedRef.current) {
       if (rms >= 0.001) {
         console.log(
           `🎵 Non-silent audio detected in chunk #${audioChunksRef.current.length}, RMS: ${rms}`
         );
         nonSilentDetectedRef.current = true;
+        // Set recording start time to when we first detect non-silent audio
+        recordingStartTimeRef.current = performance.now();
       } else {
         console.log(
           `⏭ Skipping silent chunk #${audioChunksRef.current.length}, RMS: ${rms}`
@@ -108,8 +110,11 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         ? performance.now() - recordingStartTimeRef.current
         : "N/A";
 
+      // Calculate chunk index including silent chunks
+      const currentChunkIndex = audioChunksRef.current.length;
+
       console.log(
-        `🔍 [Chunk ${audioChunksRef.current.length}] Audio chunk received at ${timestamp}:`,
+        `🔍 [Chunk ${currentChunkIndex}] Audio chunk received at ${timestamp}:`,
         `\n- Recording state: ${isRecording} (${
           isRecording ? "ACTIVE" : "INACTIVE"
         })`,
@@ -149,8 +154,9 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         (acc, chunk) => acc + chunk.length,
         0
       );
-      const wallClockTime =
-        (performance.now() - recordingStartTimeRef.current) / 1000;
+      const wallClockTime = nonSilentDetectedRef.current
+        ? (performance.now() - recordingStartTimeRef.current) / 1000
+        : 0;
       const theoreticalDuration = totalSamples / data.format.sampleRate;
 
       console.log(
