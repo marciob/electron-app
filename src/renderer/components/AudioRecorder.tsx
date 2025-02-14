@@ -57,46 +57,43 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const processAudioChunk = useCallback((chunk: Float32Array) => {
-    // Calculate RMS for silence detection
+    // Calculate RMS for debugging purposes
     let rms = 0;
     for (let i = 0; i < chunk.length; i++) {
       rms += chunk[i] * chunk[i];
     }
     rms = Math.sqrt(rms / chunk.length);
 
-    if (!nonSilentDetectedRef.current) {
-      if (rms >= 0.001) {
-        console.log(
-          `🎵 Non-silent audio detected in chunk #${audioChunksRef.current.length}, RMS: ${rms}`
-        );
-        nonSilentDetectedRef.current = true;
-        // Set recording start time to now
-        recordingStartTimeRef.current = performance.now();
-      } else {
-        console.log(
-          `⏭ Skipping silent chunk #${audioChunksRef.current.length}, RMS: ${rms}`
-        );
-        return;
-      }
+    // Set recording start time if this is the first chunk
+    if (!recordingStartTimeRef.current) {
+      recordingStartTimeRef.current = performance.now();
+      console.log(`🎵 Recording started with first chunk, RMS: ${rms}`);
     }
 
-    // Add to processing queue
-    processingQueueRef.current.push(chunk);
+    // Add chunk directly to audioChunksRef
+    audioChunksRef.current.push(chunk);
 
-    // Schedule processing if not already scheduled
-    if (!processingTimeoutRef.current) {
-      processingTimeoutRef.current = setTimeout(() => {
-        const chunks = processingQueueRef.current;
-        processingQueueRef.current = [];
-        processingTimeoutRef.current = null;
+    // Log chunk analysis
+    analyzeAudioBuffer(chunk, audioChunksRef.current.length - 1);
 
-        // Process all queued chunks
-        chunks.forEach((chunk) => {
-          audioChunksRef.current.push(chunk);
-          analyzeAudioBuffer(chunk, audioChunksRef.current.length - 1);
-        });
-      }, 5); // Process chunks every 5ms
-    }
+    // Calculate total samples for logging
+    const totalSamples = audioChunksRef.current.reduce(
+      (acc, chunk) => acc + chunk.length,
+      0
+    );
+
+    // Log processing status
+    console.log(
+      `Chunk processed - ` +
+        `Size: ${chunk.length} samples, ` +
+        `Total chunks: ${audioChunksRef.current.length}, ` +
+        `Total samples: ${totalSamples}, ` +
+        `Wall time: ${(
+          (performance.now() - recordingStartTimeRef.current) /
+          1000
+        ).toFixed(3)}s, ` +
+        `Theoretical: ${(totalSamples / 48000).toFixed(3)}s`
+    );
   }, []);
 
   const handleAudioData = useCallback(
