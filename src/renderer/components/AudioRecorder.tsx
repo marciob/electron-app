@@ -70,7 +70,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
           `🎵 Non-silent audio detected in chunk #${audioChunksRef.current.length}, RMS: ${rms}`
         );
         nonSilentDetectedRef.current = true;
-        // Set recording start time to when we first detect non-silent audio
+        // Set recording start time to now
         recordingStartTimeRef.current = performance.now();
       } else {
         console.log(
@@ -230,7 +230,7 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         });
 
         if (!cleanup) {
-          recordingStartTimeRef.current = performance.now();
+          // Don't set recordingStartTimeRef here anymore, we'll set it when we detect non-silent audio
           setAudioFormat({ sampleRate: 48000, channels: 1 });
 
           console.log("✅ Recording started successfully:", {
