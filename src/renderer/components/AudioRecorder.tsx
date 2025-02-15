@@ -55,6 +55,21 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const nonSilentDetectedRef = useRef(false);
   const processingQueueRef = useRef<Float32Array[]>([]);
   const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isStartingRef = useRef(false);
+  const cleanupRef = useRef<(() => void) | null>(null);
+
+  const cleanup = useCallback(() => {
+    if (cleanupRef.current) {
+      cleanupRef.current();
+      cleanupRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+  }, [cleanup]);
 
   const processAudioChunk = useCallback((chunk: Float32Array) => {
     // Calculate RMS for debugging purposes
@@ -169,13 +184,13 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
   );
 
   useEffect(() => {
-    let cleanup = false;
-    let eventHandler: ((data: any) => void) | null = null;
+    let isMounted = true;
 
     const setupRecording = async () => {
-      if (!isRecording || cleanup) return;
+      if (!isRecording || isStartingRef.current) return;
 
       try {
+        isStartingRef.current = true;
         console.log("📊 Recording setup - Pre-recording state check:");
         console.log(
           `- Audio chunks in memory: ${audioChunksRef.current.length}`
@@ -183,6 +198,9 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         console.log(`- Previous session ID: ${recordingSessionId.current}`);
         console.log(`- Recording state: ${isRecording}`);
         console.log(`- Processing state: ${isProcessing}`);
+
+        // Clean up any existing recording first
+        cleanup();
 
         // Reset state
         nonSilentDetectedRef.current = false;
@@ -207,23 +225,30 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
           sampleRate: 48000,
         });
 
-        // Remove any existing event listener
-        if (eventHandler) {
-          window.electron.ipcRenderer.removeListener(
-            "audio-data",
-            eventHandler
-          );
-        }
-
         // Create new event handler
-        eventHandler = (data: any) => {
-          if (!cleanup && isRecording && data.sessionId === currentSessionId) {
+        const eventHandler = (data: any) => {
+          if (isMounted && isRecording && data.sessionId === currentSessionId) {
             handleAudioData(data);
           }
         };
 
         // Add new event listener
         window.electron.ipcRenderer.on("audio-data", eventHandler);
+
+        // Store cleanup function
+        cleanupRef.current = () => {
+          console.log("Cleaning up recording session", currentSessionId);
+          window.electron.ipcRenderer.removeListener(
+            "audio-data",
+            eventHandler
+          );
+          window.electron.ipcRenderer
+            .invoke("stop-audio-capture")
+            .catch(console.error);
+          if (audioContextRef.current) {
+            audioContextRef.current.close().catch(console.error);
+          }
+        };
 
         // Start the capture with both system and mic
         console.log("🎬 Starting audio capture (system + mic)...");
@@ -233,9 +258,8 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
           mic: true,
         });
 
-        if (!cleanup) {
+        if (isMounted) {
           setAudioFormat({ sampleRate: 48000, channels: 1 });
-
           console.log("✅ Recording started successfully:", {
             timestamp: new Date().toISOString(),
             sessionId: currentSessionId,
@@ -244,45 +268,23 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
         }
       } catch (error) {
         console.error("❌ Failed to start recording:", error);
-        if (!cleanup) {
+        if (isMounted) {
           setIsRecording(false);
           setIsRecordingSystem(false);
+          setIsRecordingMic(false);
         }
+      } finally {
+        isStartingRef.current = false;
       }
     };
 
     setupRecording();
 
     return () => {
-      cleanup = true;
-      if (processingTimeoutRef.current) {
-        clearTimeout(processingTimeoutRef.current);
-      }
-      if (eventHandler) {
-        window.electron.ipcRenderer.removeListener("audio-data", eventHandler);
-      }
-      const stopCapture = async () => {
-        // Only stop if we're not already in the process of stopping
-        if (isRecording && !isProcessing) {
-          console.log("🛑 Stopping capture in cleanup...");
-          try {
-            await window.electron.ipcRenderer.invoke("stop-audio-capture");
-          } catch (error) {
-            console.error("Error during cleanup:", error);
-          }
-        }
-        if (audioContextRef.current) {
-          try {
-            await audioContextRef.current.close();
-            audioContextRef.current = null;
-          } catch (error) {
-            console.error("Error closing audio context:", error);
-          }
-        }
-      };
-      stopCapture();
+      isMounted = false;
+      cleanup();
     };
-  }, [isRecording, isProcessing, handleAudioData]);
+  }, [isRecording, isProcessing, handleAudioData, cleanup]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
@@ -310,72 +312,20 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
       .padStart(2, "0")}`;
   };
 
-  const cleanupRecording = async () => {
-    // Stop audio capture first
-    try {
-      await window.electron.ipcRenderer.invoke("stop-audio-capture");
-    } catch (error) {
-      console.error("Error stopping capture:", error);
-    }
+  const startRecording = useCallback(() => {
+    if (isStartingRef.current || isRecording) return;
+    setIsRecording(true);
+    setIsRecordingSystem(true);
+    setIsRecordingMic(true);
+  }, [isRecording]);
 
-    // Reset all state
-    audioChunksRef.current = [];
-    processingQueueRef.current = [];
-    recordingStartTimeRef.current = 0;
-    nonSilentDetectedRef.current = false;
+  const stopRecording = useCallback(async () => {
+    if (!isRecording) return;
     setIsRecording(false);
     setIsRecordingSystem(false);
-    setTimer(0);
-
-    // Close audio context
-    if (audioContextRef.current) {
-      try {
-        await audioContextRef.current.close();
-        audioContextRef.current = null;
-      } catch (error) {
-        console.error("Error closing audio context:", error);
-      }
-    }
-  };
-
-  const startRecording = async () => {
-    if (isProcessing || isRecording) return;
-    setIsProcessing(true);
-    try {
-      // Clean up any existing state first
-      audioChunksRef.current = [];
-      processingQueueRef.current = [];
-      recordingStartTimeRef.current = 0;
-      nonSilentDetectedRef.current = false;
-
-      setIsRecording(true);
-      setIsRecordingSystem(true);
-      setTimer(0);
-
-      // Start capture with both system and mic
-      await window.electron.ipcRenderer.invoke("start-audio-capture", {
-        sessionId: recordingSessionId.current,
-        system: true,
-        mic: true,
-      });
-    } catch (error) {
-      console.error("Failed to start recording:", error);
-      setIsRecording(false);
-      setIsRecordingSystem(false);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const stopRecording = async () => {
-    if (!isRecording) return;
-    setIsProcessing(true);
+    setIsRecordingMic(false);
 
     try {
-      setIsRecording(false);
-      setIsRecordingSystem(false);
-      setTimer(0);
-
       // Process the recording only if we have data
       if (audioChunksRef.current.length > 0) {
         const recordingEndTime = performance.now();
@@ -464,32 +414,21 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({
           channels: audioFormat.channels,
         };
 
-        // Only update if we're still in the same session
-        if (recordingSessionId.current === recordingSessionId.current) {
-          setRecordings((prev) => [newRecording, ...prev]);
+        setRecordings((prev) => [newRecording, ...prev]);
 
-          if (onRecordingComplete) {
-            onRecordingComplete(wavBlob);
-          }
+        if (onRecordingComplete) {
+          onRecordingComplete(wavBlob);
         }
       }
     } catch (error) {
-      console.error("Failed to stop recording:", error);
-      // Ensure states are reset even on error
-      setIsRecording(false);
-      setIsRecordingSystem(false);
-      setTimer(0);
+      console.error("Failed to process recording:", error);
       alert(
-        error instanceof Error ? error.message : "Failed to stop recording"
+        error instanceof Error ? error.message : "Failed to process recording"
       );
-    } finally {
-      setIsProcessing(false);
-      // Clear the audio chunks if we're not keeping the recording
-      if (!isRecording) {
-        audioChunksRef.current = [];
-      }
     }
-  };
+
+    cleanup();
+  }, [isRecording, cleanup, audioFormat, onRecordingComplete]);
 
   const audioBufferToWav = (buffer: AudioBuffer): Promise<Blob> => {
     const numChannels = buffer.numberOfChannels;

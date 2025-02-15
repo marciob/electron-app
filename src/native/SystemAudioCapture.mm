@@ -8,6 +8,11 @@
 @public
     AudioStreamBasicDescription _format;
     AudioUnit _mixerUnit;
+    float* _delayBuffer;
+    size_t _delayBufferSize;
+    size_t _delayBufferPos;
+    float _lastSystemPeak;
+    float _micDuckingFactor;
 }
 - (instancetype)initWithFormat:(AudioStreamBasicDescription)format;
 - (void)processSystemAudio:(const float*)systemBuffer mic:(const float*)micBuffer frames:(UInt32)frames output:(float*)outputBuffer;
@@ -19,6 +24,11 @@
 - (instancetype)initWithFormat:(AudioStreamBasicDescription)format {
     if (self = [super init]) {
         _format = format;
+        _delayBufferSize = format.mSampleRate * 0.10; // 100ms delay buffer
+        _delayBuffer = (float*)calloc(_delayBufferSize, sizeof(float));
+        _delayBufferPos = 0;
+        _lastSystemPeak = 0.0f;
+        _micDuckingFactor = 1.0f;
         [self setupMixer];
     }
     return self;
@@ -64,13 +74,43 @@
 }
 
 - (void)processSystemAudio:(const float*)systemBuffer mic:(const float*)micBuffer frames:(UInt32)frames output:(float*)outputBuffer {
-    // Mix system audio and mic input with proper gain control
+    // Calculate system audio peak for ducking
+    float currentSystemPeak = 0.0f;
+    if (systemBuffer) {
+        for (UInt32 i = 0; i < frames; i++) {
+            currentSystemPeak = fmax(currentSystemPeak, fabsf(systemBuffer[i]));
+        }
+    }
+    
+    // Smooth the peak detection
+    _lastSystemPeak = _lastSystemPeak * 0.9f + currentSystemPeak * 0.1f;
+    
+    // Calculate mic ducking factor based on system audio level
+    float targetDucking = (_lastSystemPeak > 0.1f) ? 
+        fmax(0.3f, 1.0f - (_lastSystemPeak * 1.5f)) : 1.0f;
+    
+    // Smooth the ducking transition
+    _micDuckingFactor = _micDuckingFactor * 0.95f + targetDucking * 0.05f;
+    
+    // Process audio with echo cancellation
     for (UInt32 i = 0; i < frames; i++) {
         float systemSample = systemBuffer ? systemBuffer[i] : 0.0f;
-        float micSample = micBuffer ? micBuffer[i] : 0.0f;
+        float micSample = micBuffer ? micBuffer[i] * _micDuckingFactor : 0.0f;
         
-        // Apply soft clipping to prevent distortion
-        float mixed = systemSample + micSample;
+        // Store system audio in delay buffer for echo estimation
+        float delayedSystem = _delayBuffer[_delayBufferPos];
+        _delayBuffer[_delayBufferPos] = systemSample;
+        _delayBufferPos = (_delayBufferPos + 1) % _delayBufferSize;
+        
+        // Simple echo cancellation: subtract delayed system audio from mic
+        if (micBuffer) {
+            micSample -= delayedSystem * 0.3f; // Adjust echo cancellation strength
+        }
+        
+        // Mix the streams with proper gains
+        float mixed = systemSample * 0.7f + micSample * 0.6f;
+        
+        // Soft clipping to prevent distortion
         if (mixed > 1.0f) {
             mixed = 1.0f - expf(-mixed);
         } else if (mixed < -1.0f) {
@@ -87,6 +127,16 @@
         AudioComponentInstanceDispose(_mixerUnit);
         _mixerUnit = NULL;
     }
+    
+    if (_delayBuffer) {
+        free(_delayBuffer);
+        _delayBuffer = NULL;
+    }
+}
+
+- (void)dealloc {
+    [self cleanup];
+    [super dealloc];
 }
 
 @end
@@ -102,6 +152,8 @@
 @property (atomic) BOOL isCapturing;
 @property (nonatomic) BOOL shouldCaptureMic;
 @property (nonatomic) BOOL shouldCaptureSystem;
+@property (nonatomic) NSInteger sessionId;
+@property (atomic) BOOL isStarting;
 @end
 
 @implementation AudioCapturer
@@ -112,41 +164,62 @@
         _systemAudioBuffer = [NSMutableData new];
         _micAudioBuffer = [NSMutableData new];
         _isCapturing = NO;
+        _isStarting = NO;
+        _sessionId = -1;
     }
     return self;
 }
 
 - (void)startCaptureWithOptions:(NSDictionary*)options {
-    _shouldCaptureMic = [options[@"mic"] boolValue];
-    _shouldCaptureSystem = [options[@"system"] boolValue];
-    
-    if (!_shouldCaptureMic && !_shouldCaptureSystem) {
-        NSLog(@"❌ No capture sources specified");
-        return;
-    }
-    
-    _isCapturing = YES;
-    
-    // Initialize audio mixer with desired format
-    AudioStreamBasicDescription format = {
-        .mSampleRate = 48000.0,
-        .mFormatID = kAudioFormatLinearPCM,
-        .mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-        .mBytesPerPacket = 4,
-        .mFramesPerPacket = 1,
-        .mBytesPerFrame = 4,
-        .mChannelsPerFrame = 1,
-        .mBitsPerChannel = 32
-    };
-    
-    _audioMixer = [[AudioMixer alloc] initWithFormat:format];
-    
-    if (_shouldCaptureSystem) {
-        [self initializeSystemCapture];
-    }
-    
-    if (_shouldCaptureMic) {
-        [self initializeMicCapture];
+    @synchronized(self) {
+        if (self.isStarting) {
+            NSLog(@"⚠️ Capture start already in progress, ignoring request");
+            return;
+        }
+        
+        if (self.isCapturing) {
+            NSLog(@"⚠️ Capture already active, stopping previous session %ld", (long)self.sessionId);
+            [self stopCapture];
+        }
+        
+        self.isStarting = YES;
+        
+        _shouldCaptureMic = [options[@"mic"] boolValue];
+        _shouldCaptureSystem = [options[@"system"] boolValue];
+        _sessionId = [options[@"sessionId"] integerValue];
+        
+        NSLog(@"Starting new capture session %ld", (long)self.sessionId);
+        
+        if (!_shouldCaptureMic && !_shouldCaptureSystem) {
+            NSLog(@"❌ No capture sources specified");
+            self.isStarting = NO;
+            return;
+        }
+        
+        // Initialize audio mixer with desired format
+        AudioStreamBasicDescription format = {
+            .mSampleRate = 48000.0,
+            .mFormatID = kAudioFormatLinearPCM,
+            .mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            .mBytesPerPacket = 4,
+            .mFramesPerPacket = 1,
+            .mBytesPerFrame = 4,
+            .mChannelsPerFrame = 1,
+            .mBitsPerChannel = 32
+        };
+        
+        _audioMixer = [[AudioMixer alloc] initWithFormat:format];
+        _isCapturing = YES;
+        
+        if (_shouldCaptureSystem) {
+            [self initializeSystemCapture];
+        }
+        
+        if (_shouldCaptureMic) {
+            [self initializeMicCapture];
+        }
+        
+        self.isStarting = NO;
     }
 }
 
@@ -337,42 +410,77 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)stopCapture {
-    self.isCapturing = NO;
-    
-    // Stop system audio capture
-    if (self.systemStream) {
-        [self.systemStream stopCaptureWithCompletionHandler:^(NSError *error) {
-            if (error) {
-                NSLog(@"❌ Error stopping system capture: %@", error);
-            }
-            self.systemStream = nil;
-        }];
+    @synchronized(self) {
+        if (!self.isCapturing) {
+            NSLog(@"⚠️ Capture already stopped for session %ld", (long)self.sessionId);
+            return;
+        }
+        
+        NSLog(@"Stopping capture for session %ld", (long)self.sessionId);
+        self.isCapturing = NO;
+        
+        dispatch_group_t cleanupGroup = dispatch_group_create();
+        
+        // Stop system audio capture
+        if (self.systemStream) {
+            dispatch_group_enter(cleanupGroup);
+            
+            SCStream *streamToStop = self.systemStream;
+            self.systemStream = nil;  // Clear reference first
+            
+            [streamToStop stopCaptureWithCompletionHandler:^(NSError *error) {
+                if (error) {
+                    NSLog(@"❌ Error stopping system capture for session %ld: %@", (long)self.sessionId, error);
+                } else {
+                    NSLog(@"✅ System capture stopped successfully for session %ld", (long)self.sessionId);
+                }
+                dispatch_group_leave(cleanupGroup);
+            }];
+        }
+        
+        // Stop microphone capture
+        if (self.micSession) {
+            AVCaptureSession *sessionToStop = self.micSession;
+            self.micSession = nil;  // Clear reference first
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                [sessionToStop stopRunning];
+                NSLog(@"✅ Microphone capture stopped for session %ld", (long)self.sessionId);
+            });
+        }
+        
+        // Wait for cleanup to complete with a timeout
+        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC));
+        dispatch_group_wait(cleanupGroup, timeout);
+        
+        // Clear buffers
+        @synchronized (self.systemAudioBuffer) {
+            [self.systemAudioBuffer setLength:0];
+        }
+        @synchronized (self.micAudioBuffer) {
+            [self.micAudioBuffer setLength:0];
+        }
+        
+        // Clean up mixer
+        if (self.audioMixer) {
+            [self.audioMixer cleanup];
+            self.audioMixer = nil;
+        }
+        
+        // Release JS callback
+        if (self.jsCallback) {
+            self.jsCallback.Release();
+        }
+        
+        NSLog(@"Capture instance cleanup completed for session %ld", (long)self.sessionId);
     }
-    
-    // Stop microphone capture
-    if (self.micSession) {
-        [self.micSession stopRunning];
-        self.micSession = nil;
+}
+
+- (void)dealloc {
+    NSLog(@"AudioCapturer dealloc called for session %ld", (long)self.sessionId);
+    if (self.isCapturing) {
+        [self stopCapture];
     }
-    
-    // Clear buffers
-    @synchronized (self.systemAudioBuffer) {
-        [self.systemAudioBuffer setLength:0];
-    }
-    @synchronized (self.micAudioBuffer) {
-        [self.micAudioBuffer setLength:0];
-    }
-    
-    // Clean up mixer
-    if (self.audioMixer) {
-        [self.audioMixer cleanup];
-        self.audioMixer = nil;
-    }
-    
-    // Release JS callback
-    if (self.jsCallback) {
-        self.jsCallback.Release();
-    }
+    [super dealloc];
 }
 
 @end
@@ -398,6 +506,15 @@ public:
         capturer = [[AudioCapturer alloc] init];
     }
 
+    ~SystemAudioCapture() {
+        if (capturer) {
+            NSLog(@"SystemAudioCapture destructor called");
+            [capturer stopCapture];
+            [capturer release];
+            capturer = nil;
+        }
+    }
+
 private:
     AudioCapturer* capturer;
 
@@ -419,10 +536,12 @@ private:
         
         bool systemEnabled = options.Get("system").ToBoolean();
         bool micEnabled = options.Get("mic").ToBoolean();
+        int32_t sessionId = options.Get("sessionId").ToNumber().Int32Value();
         
         NSDictionary* captureOptions = @{
             @"system": @(systemEnabled),
-            @"mic": @(micEnabled)
+            @"mic": @(micEnabled),
+            @"sessionId": @(sessionId)
         };
         
         [capturer startCaptureWithOptions:captureOptions];
@@ -431,7 +550,9 @@ private:
 
     Napi::Value StopCapture(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
-        [capturer stopCapture];
+        if (capturer) {
+            [capturer stopCapture];
+        }
         return env.Undefined();
     }
 };

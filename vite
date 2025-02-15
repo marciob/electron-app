@@ -1,0 +1,102 @@
+
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprec
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+
+  VITE v5.4.14  ready in 162 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+  ➜  press h + enter to show help
+(node:85030) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///Users/m/Desktop/dev/electron/electron-test3/
+(node:85030) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///Users/m/Desktop/dev/electron/electron-test3/postcss.config.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /Users/m/Desktop/dev/electron/electron-test3/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+vite v5.4.14 building for development...
+
+watching for file changes...
+vite v5.4.14 building for development...
+
+watching for file changes...
+
+build started...
+
+build started... (x2)
+✓ 1 modules transformed.
+✓ 1 modules transformed. (x2)
+dist-electron/preload/index.js  0.58 kB │ gzip: 0.25 kB │ map: 1.20 kB
+built in 54ms.
+dist-electron/main.js  4.30 kB │ gzip: 1.46 kB │ map: 8.11 kB
+built in 56ms.
+2025-02-15 00:35:56.554 Electron[85033:52177786] +[IMKClient subclass]: chose IMKClient_Modern
+2025-02-15 00:35:56.554 Electron[85033:52177786] +[IMKInputSession subclass]: chose IMKInputSession_Modern
+[85054:0215/003600.782392:ERROR:system_services.cc(34)] SetApplicationIsDaemon: Error Domain=NSOSStatusErrorDomain Code=
+[85054:0215/003600.782392:ERROR:system_services.cc(34)] SetApplicationIsDaemon: Error Domain=NSOSStatusErrorDomain Code=-50 "paramErr: error in user parameter list" (-50)
+Starting new audio capture with options: { sessionId: 1, system: true, mic: true }
+New native module instance created
+2025-02-15 00:36:00.999 Electron[85033:52177786] Starting new capture session 1
+2025-02-15 00:36:01.110 Electron[85033:52177788] 📊 System stream configuration: channels=1
+2025-02-15 00:36:01.110 Electron[85033:52177788] ✅ System stream output added successfully
+2025-02-15 00:36:01.279 Electron[85033:52177970] ✅ System audio capture started successfully
+2025-02-15 00:36:01.667 Electron[85033:52177786] WARNING: AVCaptureDeviceTypeExternal is deprecated for Continuity Camer
+2025-02-15 00:36:01.667 Electron[85033:52177786] WARNING: AVCaptureDeviceTypeExternal is deprecated for Continuity Cameras. Please use AVCaptureDeviceTypeContinuityCamera and add NSCameraUseContinuityCameraDeviceType to your Info.plist.
+2025-02-15 00:36:01.774 Electron[85033:52177786] ✅ Microphone capture started successfully
+Audio capture started successfully
+Stopping previous capture instance
+2025-02-15 00:36:06.544 Electron[85033:52177786] Stopping capture for session 1
+2025-02-15 00:36:06.557 Electron[85033:52177972] ✅ Microphone capture stopped for session 1
+2025-02-15 00:36:06.566 Electron[85033:52177970] ✅ System capture stopped successfully for session 1
+2025-02-15 00:36:06.566 Electron[85033:52177786] Capture instance cleanup completed for session 1
+Capture instance cleanup completed
+2025-02-15 00:36:09.499 Electron Helper (GPU)[85039:52177915] WARNING: AVCaptureDeviceTypeExternal is deprecated for Con
+2025-02-15 00:36:09.499 Electron Helper (GPU)[85039:52177915] WARNING: AVCaptureDeviceTypeExternal is deprecated for Continuity Cameras. Please use AVCaptureDeviceTypeContinuityCamera and add NSCameraUseContinuityCameraDeviceType to your In
+2025-02-15 00:36:09.499 Electron Helper (GPU)[85039:52177915] WARNING: AVCaptureDeviceTypeExternal is deprecated for Continuity Cameras. Please use AVCaptureDeviceTypeContinuityCamera and add NSCameraUseContinuityCameraDeviceType to your Info.plist.
+2025-02-15 00:36:25.619 Electron[85033:52177786] SystemAudioCapture destructor called
+2025-02-15 00:36:25.619 Electron[85033:52177786] ⚠️ Capture already stopped for session 1
+2025-02-15 00:36:25.619 Electron[85033:52177786] AudioCapturer dealloc called for session 1
+Starting new audio capture with options: { sessionId: 2, system: true, mic: true }
+New native module instance created
+2025-02-15 00:36:33.171 Electron[85033:52177786] Starting new capture session 2
+2025-02-15 00:36:33.281 Electron[85033:52177796] 📊 System stream configuration: channels=1
+2025-02-15 00:36:33.281 Electron[85033:52177796] ✅ System stream output added successfully
+2025-02-15 00:36:33.286 Electron[85033:52177786] ✅ Microphone capture started successfully
+Audio capture started successfully
+2025-02-15 00:36:33.426 Electron[85033:52177796] ✅ System audio capture started successfully
+Stopping previous capture instance
+2025-02-15 00:36:41.194 Electron[85033:52177786] Stopping capture for session 2
+2025-02-15 00:36:41.220 Electron[85033:52178893] ✅ Microphone capture stopped for session 2
+2025-02-15 00:36:41.224 Electron[85033:52179127] ✅ System capture stopped successfully for session 2
+2025-02-15 00:36:41.224 Electron[85033:52177786] Capture instance cleanup completed for session 2
+Capture instance cleanup completed
+^C
+m@Ms-MacBook-Pro-2 electron-test3 % Window closing, cleaning up audio capture
+m@Ms-MacBook-Pro-2 electron-test3 % > electron-react-app@1.0.0 electron:dev
+> vite
+
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprec
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprec
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+
+  VITE v5.4.14  ready in 162 ms
+
+  ➜  Local:   http://localhost:5173/
+m@Ms-MacBook-Pro-2 electron-test3 % > electron-react-app@1.0.0 electron:dev
+> vite
+
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprec
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprec
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+
+  VITE v5.4.14  ready in 162 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Netwzsh: command not found: electron:devm@Ms-MacBook-Pro-2 electron-test3 % > electron-react-app@1.0.0 electron:dev
+> vite
+
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprec
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprec
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+
+  VITE v5.4.14  ready in 162 ms
+
+  ➜  Local:   http://localhost:5173/
